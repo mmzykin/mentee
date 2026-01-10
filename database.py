@@ -439,5 +439,23 @@ def get_all_students_stats() -> List[Dict]:
     return result
 
 
+def get_student_by_id(student_id: int) -> Optional[Dict]:
+    """Get student by internal ID (not user_id)."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM students WHERE id = ?", (student_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_submission_by_id(submission_id: int) -> Optional[Dict]:
+    """Get submission by ID."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM submissions WHERE id = ?", (submission_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
 # Initialize on import
 init_db()

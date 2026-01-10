@@ -1,9 +1,5 @@
 """
-Telegram Mentor Bot v2 with Inline Buttons
-- SQLite database for students, tasks, submissions
-- Registration with unique codes
-- Admin panel for managing tasks
-- Convenient button navigation
+Telegram Mentor Bot v2 with Full Button Navigation
 """
 
 import os
@@ -31,14 +27,54 @@ import database as db
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 EXEC_TIMEOUT = 10
+ADMIN_USERNAMES = ["qwerty1492"]
 
-# Conversation states
-(
-    WAITING_CODE,
-    WAITING_TASK_DATA,
-    WAITING_TOPIC_DATA,
-    CONFIRM_DELETE,
-) = range(4)
+WAITING_TASK_DATA = 1
+
+
+# ============== KEYBOARDS ==============
+
+def main_menu_keyboard(is_admin=False):
+    """Main menu buttons."""
+    keyboard = [
+        [InlineKeyboardButton("📚 Задания", callback_data="back:topics")],
+        [InlineKeyboardButton("📊 Моя статистика", callback_data="menu:mystats")],
+    ]
+    if is_admin:
+        keyboard.append([InlineKeyboardButton("👑 Админ-панель", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def admin_menu_keyboard():
+    """Admin panel buttons."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📚 Темы", callback_data="admin:topics"),
+            InlineKeyboardButton("📝 Задания", callback_data="admin:tasks"),
+        ],
+        [
+            InlineKeyboardButton("👥 Студенты", callback_data="admin:students"),
+            InlineKeyboardButton("🎫 Коды", callback_data="admin:codes"),
+        ],
+        [
+            InlineKeyboardButton("➕ Создать коды", callback_data="admin:gencodes"),
+        ],
+        [InlineKeyboardButton("« Главное меню", callback_data="menu:main")],
+    ])
+
+
+def back_to_menu_keyboard():
+    """Simple back to main menu."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("« Главное меню", callback_data="menu:main")]
+    ])
+
+
+def back_to_admin_keyboard():
+    """Back to admin panel."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("« Админ-панель", callback_data="menu:admin")]
+    ])
 
 
 # ============== TASK PARSER ==============
@@ -109,6 +145,11 @@ def run_code_with_tests(code: str, test_code: str) -> tuple[bool, str]:
             pass
 
 
+def escape_html(text: str) -> str:
+    """Escape HTML special characters."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 # ============== HELPER FUNCTIONS ==============
 
 def require_admin(func):
@@ -131,8 +172,7 @@ def require_registered(func):
         if not db.is_registered(user_id):
             await update.message.reply_text(
                 "⛔ Сначала зарегистрируйся!\n"
-                "Используй: /register <КОД>\n"
-                "Код получи у ментора."
+                "Используй: /register КОД"
             )
             return
         return await func(update, context)
@@ -144,72 +184,79 @@ def require_registered(func):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command."""
     user = update.effective_user
+    name = escape_html(user.first_name)
     
+    # Hardcoded admins
+    if user.username and user.username.lower() in ADMIN_USERNAMES:
+        if not db.is_admin(user.id):
+            db.add_admin(user.id)
+            await update.message.reply_text(
+                f"👑 <b>{name}</b>, ты теперь админ!",
+                reply_markup=main_menu_keyboard(is_admin=True),
+                parse_mode="HTML"
+            )
+            return
+    
+    # First user becomes admin
     if db.get_admin_count() == 0:
         db.add_admin(user.id)
         await update.message.reply_text(
-            f"👑 {user.first_name}, ты первый пользователь — теперь ты админ!\n\n"
-            "Админ-команды:\n"
-            "/admin — панель управления\n"
-            "/gencodes 5 — создать 5 кодов\n"
-            "/addtopic — добавить тему\n"
-            "/addtask — добавить задание\n"
-            "/students — список студентов\n\n"
-            "Начни с /addtopic чтобы создать первую тему!"
+            f"👑 <b>{name}</b>, ты первый — теперь ты админ!",
+            reply_markup=main_menu_keyboard(is_admin=True),
+            parse_mode="HTML"
         )
         return
     
     if db.is_admin(user.id):
         await update.message.reply_text(
-            f"👑 С возвращением, {user.first_name}!\n\n"
-            "/admin — панель управления\n"
-            "/topics — задания"
+            f"👑 С возвращением, <b>{name}</b>!",
+            reply_markup=main_menu_keyboard(is_admin=True),
+            parse_mode="HTML"
         )
         return
     
     student = db.get_student(user.id)
     if student:
-        keyboard = [[InlineKeyboardButton("📚 Задания", callback_data="back:topics")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            f"👋 С возвращением, {user.first_name}!",
-            reply_markup=reply_markup
+            f"👋 С возвращением, <b>{name}</b>!",
+            reply_markup=main_menu_keyboard(),
+            parse_mode="HTML"
         )
     else:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 У меня есть код", callback_data="menu:register")]
+        ])
         await update.message.reply_text(
-            f"👋 Привет, {user.first_name}!\n\n"
-            "Для доступа к заданиям нужна регистрация.\n"
-            "Используй: /register <КОД>\n\n"
-            "Код получи у ментора."
+            f"👋 Привет, <b>{name}</b>!\n\n"
+            "Для доступа нужна регистрация.\n"
+            "Получи код у ментора.",
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command."""
     user = update.effective_user
+    is_admin = db.is_admin(user.id)
     
-    base_help = (
-        "📖 **Команды:**\n\n"
-        "/topics — список тем и заданий\n"
-        "/task <id> — посмотреть задание\n"
-        "/submit <id> — отправить решение\n"
-        "/mystats — твоя статистика\n"
+    text = (
+        "📖 <b>Команды</b>\n\n"
+        "/start — главное меню\n"
+        "/topics — задания\n"
+        "/mystats — статистика\n"
     )
     
-    if db.is_admin(user.id):
-        base_help += (
-            "\n👑 **Админ-команды:**\n"
-            "/admin — панель управления\n"
-            "/gencodes <N> — создать N кодов\n"
-            "/codes — показать свободные коды\n"
-            "/addtopic <id> <название> — добавить тему\n"
-            "/addtask — добавить задание\n"
-            "/deltask <id> — удалить задание\n"
-            "/students — список студентов\n"
-            "/student <user_id> — инфо о студенте\n"
+    if is_admin:
+        text += (
+            "\n👑 <b>Админ</b>\n"
+            "/admin — панель\n"
+            "/gencodes N — коды\n"
+            "/addtopic id name\n"
+            "/addtask — задание\n"
         )
     
-    await update.message.reply_text(base_help, parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=main_menu_keyboard(is_admin), parse_mode="HTML")
 
 
 # ============== REGISTRATION ==============
@@ -217,15 +264,20 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /register command."""
     user = update.effective_user
+    name = escape_html(user.first_name)
     
     if db.is_registered(user.id):
-        await update.message.reply_text("✅ Ты уже зарегистрирован!")
+        await update.message.reply_text(
+            "✅ Ты уже зарегистрирован!",
+            reply_markup=main_menu_keyboard()
+        )
         return
     
     if not context.args:
         await update.message.reply_text(
-            "Используй: /register <КОД>\n"
-            "Пример: /register ABC123XY"
+            "Используй: /register КОД\n"
+            "Пример: <code>/register ABC123XY</code>",
+            parse_mode="HTML"
         )
         return
     
@@ -239,355 +291,325 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     if success:
-        keyboard = [[InlineKeyboardButton("📚 К заданиям", callback_data="back:topics")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            f"✅ Регистрация успешна!\n\n"
-            f"Добро пожаловать, {user.first_name}!",
-            reply_markup=reply_markup
+            f"✅ Добро пожаловать, <b>{name}</b>!",
+            reply_markup=main_menu_keyboard(),
+            parse_mode="HTML"
         )
     else:
-        await update.message.reply_text(
-            "❌ Неверный или уже использованный код.\n"
-            "Проверь код и попробуй снова."
+        await update.message.reply_text("❌ Неверный или использованный код.")
+
+
+# ============== MENU CALLBACKS ==============
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle menu navigation."""
+    query = update.callback_query
+    await query.answer()
+    
+    user = update.effective_user
+    is_admin = db.is_admin(user.id)
+    action = query.data.split(":")[1]
+    
+    if action == "main":
+        await query.edit_message_text(
+            "🏠 <b>Главное меню</b>",
+            reply_markup=main_menu_keyboard(is_admin),
+            parse_mode="HTML"
         )
-
-
-# ============== ADMIN: CODES ==============
-
-@require_admin
-async def gen_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate registration codes."""
-    count = 5
-    if context.args:
-        try:
-            count = int(context.args[0])
-            count = max(1, min(50, count))
-        except ValueError:
-            pass
     
-    codes = db.create_codes(count)
-    codes_text = "\n".join(f"`{c}`" for c in codes)
-    await update.message.reply_text(
-        f"🎫 Созданы {len(codes)} кодов:\n\n{codes_text}\n\n"
-        "Отправь коды студентам для регистрации.",
-        parse_mode="Markdown"
-    )
-
-
-@require_admin
-async def show_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show unused codes."""
-    codes = db.get_unused_codes()
-    
-    if not codes:
-        await update.message.reply_text("Нет свободных кодов.\nСоздать: /gencodes 5")
-        return
-    
-    codes_text = "\n".join(f"`{c['code']}`" for c in codes)
-    await update.message.reply_text(
-        f"🎫 Свободные коды ({len(codes)}):\n\n{codes_text}",
-        parse_mode="Markdown"
-    )
-
-
-# ============== ADMIN: TOPICS ==============
-
-@require_admin
-async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add a new topic."""
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "Используй: /addtopic <id> <название>\n"
-            "Пример: /addtopic 1 Переменные"
-        )
-        return
-    
-    topic_id = context.args[0]
-    name = " ".join(context.args[1:])
-    
-    topics = db.get_topics()
-    order = len(topics) + 1
-    
-    if db.add_topic(topic_id, name, order):
-        await update.message.reply_text(
-            f"✅ Тема добавлена:\nID: `{topic_id}`\nНазвание: {name}",
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(f"❌ Тема `{topic_id}` уже существует.")
-
-
-@require_admin
-async def del_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete a topic."""
-    if not context.args:
-        await update.message.reply_text("Используй: /deltopic <id>")
-        return
-    
-    topic_id = context.args[0]
-    
-    if db.delete_topic(topic_id):
-        await update.message.reply_text(f"✅ Тема `{topic_id}` удалена.")
-    else:
-        await update.message.reply_text(
-            f"❌ Не удалось удалить `{topic_id}`.\n"
-            "Возможно, в теме есть задания."
-        )
-
-
-# ============== ADMIN: TASKS ==============
-
-@require_admin
-async def add_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start adding a task."""
-    topics = db.get_topics()
-    
-    if not topics:
-        await update.message.reply_text(
-            "❌ Сначала создай хотя бы одну тему!\n"
-            "Используй: /addtopic <id> <название>"
-        )
-        return ConversationHandler.END
-    
-    topics_list = "\n".join(f"• `{t['topic_id']}` — {t['name']}" for t in topics)
-    
-    await update.message.reply_text(
-        "📝 **Добавление задания**\n\n"
-        f"Доступные темы:\n{topics_list}\n\n"
-        "Отправь задание в формате:\n"
-        "```\n"
-        "TOPIC: topic_id\n"
-        "TASK_ID: task_id\n"
-        "TITLE: Название\n"
-        "---DESCRIPTION---\n"
-        "Описание...\n"
-        "---TESTS---\n"
-        "def test():\n"
-        "    assert func(1) == 2\n"
-        "    print(\"✅ All tests passed!\")\n"
-        "test()\n"
-        "```\n\n"
-        "Отмена: /cancel",
-        parse_mode="Markdown"
-    )
-    return WAITING_TASK_DATA
-
-
-async def add_task_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive and parse task data."""
-    text = update.message.text
-    
-    parsed = parse_task_format(text)
-    if not parsed:
-        await update.message.reply_text(
-            "❌ Неверный формат. Попробуй снова или /cancel"
-        )
-        return WAITING_TASK_DATA
-    
-    topic = db.get_topic(parsed["topic_id"])
-    if not topic:
-        await update.message.reply_text(f"❌ Тема `{parsed['topic_id']}` не найдена.")
-        return WAITING_TASK_DATA
-    
-    if db.get_task(parsed["task_id"]):
-        await update.message.reply_text(f"❌ Задание `{parsed['task_id']}` уже существует.")
-        return WAITING_TASK_DATA
-    
-    success = db.add_task(
-        task_id=parsed["task_id"],
-        topic_id=parsed["topic_id"],
-        title=parsed["title"],
-        description=parsed["description"],
-        test_code=parsed["test_code"]
-    )
-    
-    if success:
-        await update.message.reply_text(
-            f"✅ Задание добавлено!\n\n"
-            f"ID: `{parsed['task_id']}`\n"
-            f"Тема: {topic['name']}\n"
-            f"Название: {parsed['title']}",
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text("❌ Ошибка при добавлении.")
-    
-    return ConversationHandler.END
-
-
-@require_admin
-async def del_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete a task."""
-    if not context.args:
-        await update.message.reply_text("Используй: /deltask <task_id>")
-        return
-    
-    task_id = context.args[0]
-    task = db.get_task(task_id)
-    
-    if not task:
-        await update.message.reply_text(f"❌ Задание `{task_id}` не найдено.")
-        return
-    
-    if db.delete_task(task_id):
-        await update.message.reply_text(f"✅ Задание `{task_id}` удалено.", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ Ошибка при удалении.")
-
-
-@require_admin
-async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all tasks."""
-    topics = db.get_topics()
-    
-    if not topics:
-        await update.message.reply_text("Нет тем. Создай: /addtopic")
-        return
-    
-    text = "📚 **Все задания:**\n\n"
-    
-    for topic in topics:
-        tasks = db.get_tasks_by_topic(topic["topic_id"])
-        text += f"**{topic['name']}** (`{topic['topic_id']}`)\n"
+    elif action == "mystats":
+        student = db.get_student(user.id)
+        if not student:
+            await query.edit_message_text(
+                "Ты не зарегистрирован.",
+                reply_markup=back_to_menu_keyboard()
+            )
+            return
         
-        if tasks:
-            for task in tasks:
-                text += f"  • `{task['task_id']}` — {task['title']}\n"
-        else:
-            text += "  _(нет заданий)_\n"
-        text += "\n"
+        stats = db.get_student_stats(student["id"])
+        text = (
+            f"📊 <b>Твоя статистика</b>\n\n"
+            f"✅ Решено: <b>{stats['solved_tasks']}</b> из {stats['total_tasks']}\n"
+            f"📤 Отправок: <b>{stats['total_submissions']}</b>"
+        )
+        await query.edit_message_text(text, reply_markup=back_to_menu_keyboard(), parse_mode="HTML")
     
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-
-# ============== ADMIN: STUDENTS ==============
-
-@require_admin
-async def list_students(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all students with stats."""
-    students = db.get_all_students_stats()
+    elif action == "admin":
+        if not is_admin:
+            await query.edit_message_text("⛔ Нет доступа")
+            return
+        
+        topics = db.get_topics()
+        tasks = db.get_all_tasks()
+        students = db.get_all_students()
+        codes = db.get_unused_codes()
+        
+        text = (
+            "👑 <b>Админ-панель</b>\n\n"
+            f"📚 Тем: <b>{len(topics)}</b>\n"
+            f"📝 Заданий: <b>{len(tasks)}</b>\n"
+            f"👥 Студентов: <b>{len(students)}</b>\n"
+            f"🎫 Кодов: <b>{len(codes)}</b>"
+        )
+        await query.edit_message_text(text, reply_markup=admin_menu_keyboard(), parse_mode="HTML")
     
-    if not students:
-        await update.message.reply_text("Пока нет студентов.")
+    elif action == "register":
+        await query.edit_message_text(
+            "Отправь команду:\n<code>/register ТВОЙ_КОД</code>",
+            parse_mode="HTML"
+        )
+
+
+# ============== ADMIN CALLBACKS ==============
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle admin actions."""
+    query = update.callback_query
+    await query.answer()
+    
+    user = update.effective_user
+    if not db.is_admin(user.id):
+        await query.edit_message_text("⛔ Нет доступа")
         return
     
-    text = "👥 **Студенты:**\n\n"
+    action = query.data.split(":")[1]
     
-    for s in students:
-        name = s.get("first_name") or s.get("username") or str(s["user_id"])
-        text += (
-            f"• **{name}** (`{s['user_id']}`)\n"
-            f"  ✅ {s['solved_tasks']}/{s['total_tasks']}, "
-            f"📤 {s['total_submissions']} отправок\n"
+    if action == "topics":
+        topics = db.get_topics()
+        if not topics:
+            text = "Нет тем.\n\nДобавить: <code>/addtopic id название</code>"
+        else:
+            text = "📚 <b>Темы</b>\n\n"
+            for t in topics:
+                tasks_count = len(db.get_tasks_by_topic(t["topic_id"]))
+                text += f"• <b>{t['topic_id']}</b> — {escape_html(t['name'])} ({tasks_count})\n"
+            text += "\nДобавить: <code>/addtopic id название</code>"
+        await query.edit_message_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+    
+    elif action == "tasks":
+        topics = db.get_topics()
+        if not topics:
+            text = "Сначала создай тему: /addtopic"
+        else:
+            text = "📝 <b>Задания</b>\n\n"
+            for topic in topics:
+                tasks = db.get_tasks_by_topic(topic["topic_id"])
+                text += f"<b>{escape_html(topic['name'])}</b>\n"
+                if tasks:
+                    for task in tasks:
+                        text += f"  • <code>{task['task_id']}</code>: {escape_html(task['title'])}\n"
+                else:
+                    text += "  <i>(пусто)</i>\n"
+                text += "\n"
+            text += "Добавить: /addtask"
+        await query.edit_message_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+    
+    elif action == "students":
+        students = db.get_all_students_stats()
+        if not students:
+            await query.edit_message_text(
+                "<i>Пока нет студентов.</i>",
+                reply_markup=back_to_admin_keyboard(),
+                parse_mode="HTML"
+            )
+            return
+        
+        keyboard = []
+        for s in students:
+            name = s.get("first_name") or s.get("username") or str(s["user_id"])
+            btn_text = f"{name}: {s['solved_tasks']}/{s['total_tasks']} ✅"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"student:{s['user_id']}")])
+        
+        keyboard.append([InlineKeyboardButton("« Админ-панель", callback_data="menu:admin")])
+        
+        await query.edit_message_text(
+            "👥 <b>Студенты</b>\n\nНажми чтобы посмотреть:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
         )
     
-    await update.message.reply_text(text, parse_mode="Markdown")
+    elif action == "codes":
+        codes = db.get_unused_codes()
+        if not codes:
+            text = "<i>Нет свободных кодов.</i>"
+        else:
+            text = f"🎫 <b>Коды</b> ({len(codes)})\n\n"
+            for c in codes:
+                text += f"<code>{c['code']}</code>\n"
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Создать ещё", callback_data="admin:gencodes")],
+            [InlineKeyboardButton("« Назад", callback_data="menu:admin")]
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    
+    elif action == "gencodes":
+        codes = db.create_codes(5)
+        text = f"🎫 <b>Созданы коды</b>\n\n"
+        for c in codes:
+            text += f"<code>{c}</code>\n"
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Ещё 5", callback_data="admin:gencodes")],
+            [InlineKeyboardButton("« Админ-панель", callback_data="menu:admin")]
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
-@require_admin
-async def student_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show detailed stats for a student."""
-    if not context.args:
-        await update.message.reply_text("Используй: /student <user_id>")
+# ============== STUDENT VIEW CALLBACKS ==============
+
+async def student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show student details with task buttons."""
+    query = update.callback_query
+    await query.answer()
+    
+    user = update.effective_user
+    if not db.is_admin(user.id):
+        await query.edit_message_text("⛔ Нет доступа")
         return
     
-    try:
-        user_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("user_id должен быть числом.")
-        return
-    
+    user_id = int(query.data.split(":")[1])
     student = db.get_student(user_id)
+    
     if not student:
-        await update.message.reply_text(f"Студент {user_id} не найден.")
+        await query.edit_message_text("Студент не найден.")
         return
     
-    name = student.get("first_name") or student.get("username") or str(user_id)
+    name = escape_html(student.get("first_name") or student.get("username") or str(user_id))
     stats = db.get_student_stats(student["id"])
     
     text = (
-        f"📋 **{name}**\n"
-        f"ID: `{user_id}`\n"
-        f"Код: `{student['code_used']}`\n\n"
-        f"✅ Решено: {stats['solved_tasks']}/{stats['total_tasks']}\n"
-        f"📤 Отправок: {stats['total_submissions']}\n\n"
-        "**По темам:**\n"
+        f"📋 <b>{name}</b>\n"
+        f"ID: <code>{user_id}</code>\n"
+        f"Код: <code>{student['code_used']}</code>\n\n"
+        f"✅ Решено: <b>{stats['solved_tasks']}</b>/{stats['total_tasks']}\n"
+        f"📤 Отправок: <b>{stats['total_submissions']}</b>\n\n"
+        "Нажми на задание чтобы увидеть попытки:"
     )
     
+    # Get tasks with submissions
+    keyboard = []
     for topic in db.get_topics():
         tasks = db.get_tasks_by_topic(topic["topic_id"])
-        solved = sum(1 for t in tasks if db.has_solved(student["id"], t["task_id"]))
-        text += f"• {topic['name']}: {solved}/{len(tasks)}\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-
-@require_admin
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show admin panel."""
-    topics = db.get_topics()
-    tasks = db.get_all_tasks()
-    students = db.get_all_students()
-    codes = db.get_unused_codes()
-    
-    text = (
-        "👑 **Панель администратора**\n\n"
-        f"📚 Тем: {len(topics)}\n"
-        f"📝 Заданий: {len(tasks)}\n"
-        f"👥 Студентов: {len(students)}\n"
-        f"🎫 Свободных кодов: {len(codes)}\n\n"
-        "**Команды:**\n"
-        "/gencodes <N> — создать коды\n"
-        "/codes — показать коды\n"
-        "/addtopic <id> <n> — тема\n"
-        "/addtask — задание\n"
-        "/tasks — список заданий\n"
-        "/deltask <id> — удалить\n"
-        "/students — студенты\n"
-    )
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-
-# ============== TOPICS WITH BUTTONS ==============
-
-@require_registered
-async def topics_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show topics with buttons."""
-    user = update.effective_user
-    student = db.get_student(user.id)
-    student_id = student["id"] if student else None
-    
-    topics = db.get_topics()
-    
-    if not topics:
-        await update.message.reply_text("Пока нет доступных тем.")
-        return
-    
-    keyboard = []
-    for topic in topics:
-        tasks = db.get_tasks_by_topic(topic["topic_id"])
-        solved = sum(1 for t in tasks if student_id and db.has_solved(student_id, t["task_id"]))
-        total = len(tasks)
-        
-        if total > 0:
-            btn_text = f"{topic['name']} ({solved}/{total})"
-            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"topic:{topic['topic_id']}")])
+        for task in tasks:
+            submissions = db.get_student_submissions(student["id"], task["task_id"])
+            if submissions:
+                solved = db.has_solved(student["id"], task["task_id"])
+                status = "✅" if solved else "❌"
+                btn_text = f"{status} {task['task_id']}: {len(submissions)} попыт."
+                keyboard.append([InlineKeyboardButton(
+                    btn_text, 
+                    callback_data=f"attempts:{student['id']}:{task['task_id']}"
+                )])
     
     if not keyboard:
-        await update.message.reply_text("Пока нет заданий.")
-        return
+        text += "\n\n<i>Нет попыток</i>"
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "📚 **Выбери тему:**",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
+    keyboard.append([InlineKeyboardButton("« К студентам", callback_data="admin:students")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
     )
 
 
-# ============== CALLBACK HANDLERS ==============
+async def attempts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show student attempts for a task."""
+    query = update.callback_query
+    await query.answer()
+    
+    user = update.effective_user
+    if not db.is_admin(user.id):
+        await query.edit_message_text("⛔ Нет доступа")
+        return
+    
+    parts = query.data.split(":")
+    student_id = int(parts[1])
+    task_id = parts[2]
+    
+    student = db.get_student_by_id(student_id)
+    task = db.get_task(task_id)
+    
+    if not student or not task:
+        await query.edit_message_text("Не найдено.")
+        return
+    
+    submissions = db.get_student_submissions(student_id, task_id)
+    
+    name = escape_html(student.get("first_name") or student.get("username") or "")
+    
+    text = (
+        f"📝 <b>{escape_html(task['title'])}</b>\n"
+        f"Студент: <b>{name}</b>\n"
+        f"Попыток: <b>{len(submissions)}</b>\n\n"
+        "Нажми чтобы посмотреть код:"
+    )
+    
+    keyboard = []
+    for i, sub in enumerate(submissions, 1):
+        status = "✅" if sub["passed"] else "❌"
+        time = sub["submitted_at"][11:16] if sub["submitted_at"] else ""
+        date = sub["submitted_at"][:10] if sub["submitted_at"] else ""
+        btn_text = f"{status} #{i} — {date} {time}"
+        keyboard.append([InlineKeyboardButton(
+            btn_text,
+            callback_data=f"code:{sub['id']}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton("« К студенту", callback_data=f"student:{student['user_id']}")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+
+async def code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show submission code."""
+    query = update.callback_query
+    await query.answer()
+    
+    user = update.effective_user
+    if not db.is_admin(user.id):
+        await query.edit_message_text("⛔ Нет доступа")
+        return
+    
+    submission_id = int(query.data.split(":")[1])
+    submission = db.get_submission_by_id(submission_id)
+    
+    if not submission:
+        await query.edit_message_text("Не найдено.")
+        return
+    
+    status = "✅ Пройдено" if submission["passed"] else "❌ Не пройдено"
+    code = submission["code"]
+    
+    # Truncate if too long
+    if len(code) > 3500:
+        code = code[:3500] + "\n... (сокращено)"
+    
+    text = (
+        f"<b>{status}</b>\n"
+        f"Задание: <code>{submission['task_id']}</code>\n"
+        f"Время: {submission['submitted_at']}\n\n"
+        f"<b>Код:</b>\n<pre>{escape_html(code)}</pre>"
+    )
+    
+    # Get student_id and task_id for back button
+    student_id = submission["student_id"]
+    task_id = submission["task_id"]
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("« К попыткам", callback_data=f"attempts:{student_id}:{task_id}")]
+    ])
+    
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============== TOPICS & TASKS CALLBACKS ==============
 
 async def topic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show tasks in a topic."""
@@ -618,11 +640,10 @@ async def topic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard.append([InlineKeyboardButton("« Назад", callback_data="back:topics")])
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
-        f"📂 **{topic['name']}**\n\nВыбери задание:",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
+        f"📂 <b>{escape_html(topic['name'])}</b>\n\nВыбери задание:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
     )
 
 
@@ -639,22 +660,17 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     description = task['description']
-    if len(description) > 3000:
-        description = description[:3000] + "...\n\n_(сокращено)_"
+    if len(description) > 3500:
+        description = description[:3500] + "\n\n... (сокращено)"
     
-    text = (
-        f"📝 **{task['title']}**\n"
-        f"ID: `{task_id}`\n\n"
-        f"{description}"
-    )
+    text = f"📝 <b>{escape_html(task['title'])}</b>\nID: <code>{task_id}</code>\n\n{description}"
     
-    keyboard = [
+    keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Отправить решение", callback_data=f"submit:{task_id}")],
         [InlineKeyboardButton("« Назад", callback_data=f"topic:{task['topic_id']}")]
-    ]
+    ])
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=keyboard)
 
 
 async def submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -676,15 +692,16 @@ async def submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data["pending_task"] = task_id
     
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data=f"task:{task_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"task:{task_id}")]
+    ])
     
     await query.edit_message_text(
-        f"📤 **{task['title']}**\n\n"
-        "Отправь код в следующем сообщении.\n"
-        "Можно текстом или файлом `.py`",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
+        f"📤 <b>{escape_html(task['title'])}</b>\n\n"
+        "Отправь код следующим сообщением.\n"
+        "Текст или файл <code>.py</code>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
     )
 
 
@@ -699,6 +716,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         student = db.get_student(user.id)
         student_id = student["id"] if student else None
+        is_admin = db.is_admin(user.id)
         
         topics = db.get_topics()
         keyboard = []
@@ -712,76 +730,124 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 btn_text = f"{topic['name']} ({solved}/{total})"
                 keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"topic:{topic['topic_id']}")])
         
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard.append([InlineKeyboardButton("« Главное меню", callback_data="menu:main")])
+        
         await query.edit_message_text(
-            "📚 **Выбери тему:**",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
+            "📚 <b>Выбери тему</b>",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
         )
 
 
-# ============== COMMAND: TASK ==============
+# ============== COMMAND HANDLERS ==============
+
+@require_registered
+async def topics_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show topics with buttons."""
+    user = update.effective_user
+    student = db.get_student(user.id)
+    student_id = student["id"] if student else None
+    
+    topics = db.get_topics()
+    
+    if not topics:
+        await update.message.reply_text("Пока нет тем.", reply_markup=back_to_menu_keyboard())
+        return
+    
+    keyboard = []
+    for topic in topics:
+        tasks = db.get_tasks_by_topic(topic["topic_id"])
+        solved = sum(1 for t in tasks if student_id and db.has_solved(student_id, t["task_id"]))
+        total = len(tasks)
+        
+        if total > 0:
+            btn_text = f"{topic['name']} ({solved}/{total})"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"topic:{topic['topic_id']}")])
+    
+    keyboard.append([InlineKeyboardButton("« Главное меню", callback_data="menu:main")])
+    
+    await update.message.reply_text(
+        "📚 <b>Выбери тему</b>",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
 
 @require_registered
 async def show_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show task description (command version)."""
+    """Show task description."""
     if not context.args:
-        await update.message.reply_text("Используй: /task <id>\nИли нажми /topics")
+        await update.message.reply_text("Используй: <code>/task id</code>", parse_mode="HTML")
         return
     
     task_id = context.args[0]
     task = db.get_task(task_id)
     
     if not task:
-        await update.message.reply_text(f"❌ Задание `{task_id}` не найдено.")
+        await update.message.reply_text(f"❌ Задание <code>{task_id}</code> не найдено.", parse_mode="HTML")
         return
     
-    text = (
-        f"📝 **{task['title']}**\n"
-        f"ID: `{task_id}`\n\n"
-        f"{task['description']}"
-    )
+    text = f"📝 {task['title']}\nID: {task_id}\n\n{task['description']}"
     
-    keyboard = [
+    keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Отправить решение", callback_data=f"submit:{task_id}")],
         [InlineKeyboardButton("« К темам", callback_data="back:topics")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    ])
     
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=keyboard)
 
-
-# ============== COMMAND: SUBMIT ==============
 
 @require_registered
 async def submit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start submission (command version)."""
+    """Start submission."""
     if not context.args:
-        await update.message.reply_text("Используй: /submit <id>\nИли кнопку в /topics")
+        await update.message.reply_text("Используй: <code>/submit id</code>", parse_mode="HTML")
         return
     
     task_id = context.args[0]
     task = db.get_task(task_id)
     
     if not task:
-        await update.message.reply_text(f"❌ Задание `{task_id}` не найдено.")
+        await update.message.reply_text(f"❌ Задание <code>{task_id}</code> не найдено.", parse_mode="HTML")
         return
     
     context.user_data["pending_task"] = task_id
     
     await update.message.reply_text(
-        f"📤 **{task['title']}**\n\n"
-        "Отправь код в следующем сообщении.\n"
-        "Можно текстом или файлом `.py`\n\n"
+        f"📤 <b>{escape_html(task['title'])}</b>\n\n"
+        "Отправь код следующим сообщением.\n"
         "Отмена: /cancel",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
+
+
+@require_registered
+async def my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show student's stats."""
+    user = update.effective_user
+    student = db.get_student(user.id)
+    
+    if not student:
+        await update.message.reply_text("Ты не зарегистрирован.")
+        return
+    
+    stats = db.get_student_stats(student["id"])
+    
+    text = (
+        f"📊 <b>Твоя статистика</b>\n\n"
+        f"✅ Решено: <b>{stats['solved_tasks']}</b> из {stats['total_tasks']}\n"
+        f"📤 Отправок: <b>{stats['total_submissions']}</b>"
+    )
+    
+    await update.message.reply_text(text, reply_markup=main_menu_keyboard(), parse_mode="HTML")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel current operation."""
     context.user_data.clear()
-    await update.message.reply_text("❌ Отменено.")
+    user = update.effective_user
+    is_admin = db.is_admin(user.id)
+    await update.message.reply_text("❌ Отменено.", reply_markup=main_menu_keyboard(is_admin))
     return ConversationHandler.END
 
 
@@ -793,13 +859,14 @@ async def handle_code_submission(update: Update, context: ContextTypes.DEFAULT_T
     
     user = update.effective_user
     student = db.get_student(user.id)
+    is_admin = db.is_admin(user.id)
     
-    if not student and not db.is_admin(user.id):
+    if not student and not is_admin:
         await update.message.reply_text("⛔ Сначала зарегистрируйся!")
         return
     
     if not student:
-        student = {"id": 0}  # admin testing
+        student = {"id": 0}
     
     # Get code
     code = None
@@ -838,41 +905,290 @@ async def handle_code_submission(update: Update, context: ContextTypes.DEFAULT_T
     if student["id"] != 0:
         db.add_submission(student["id"], task_id, code, passed, output)
     
-    keyboard = []
+    safe_output = escape_html(output[:1500])
+    
     if passed:
-        keyboard.append([InlineKeyboardButton("🎉 К темам", callback_data="back:topics")])
-        result = f"✅ **Задание `{task_id}` выполнено!**\n\n```\n{output[:1500]}\n```"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎉 К темам", callback_data="back:topics")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:main")]
+        ])
+        result = f"✅ <b>Задание {task_id} выполнено!</b>\n\n<pre>{safe_output}</pre>"
     else:
-        keyboard.append([InlineKeyboardButton("🔄 Ещё раз", callback_data=f"submit:{task_id}")])
-        keyboard.append([InlineKeyboardButton("« К заданию", callback_data=f"task:{task_id}")])
-        result = f"❌ **Не пройдено**\n\n```\n{output[:1500]}\n```"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Ещё раз", callback_data=f"submit:{task_id}")],
+            [InlineKeyboardButton("« К заданию", callback_data=f"task:{task_id}")]
+        ])
+        result = f"❌ <b>Не пройдено</b>\n\n<pre>{safe_output}</pre>"
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await checking.edit_text(result, reply_markup=reply_markup, parse_mode="Markdown")
+    await checking.edit_text(result, reply_markup=keyboard, parse_mode="HTML")
 
 
-@require_registered
-async def my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show student's stats."""
-    user = update.effective_user
-    student = db.get_student(user.id)
+# ============== ADMIN COMMANDS ==============
+
+@require_admin
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin panel."""
+    topics = db.get_topics()
+    tasks = db.get_all_tasks()
+    students = db.get_all_students()
+    codes = db.get_unused_codes()
     
-    if not student:
-        await update.message.reply_text("Ты не зарегистрирован.")
+    text = (
+        "👑 <b>Админ-панель</b>\n\n"
+        f"📚 Тем: <b>{len(topics)}</b>\n"
+        f"📝 Заданий: <b>{len(tasks)}</b>\n"
+        f"👥 Студентов: <b>{len(students)}</b>\n"
+        f"🎫 Кодов: <b>{len(codes)}</b>"
+    )
+    
+    await update.message.reply_text(text, reply_markup=admin_menu_keyboard(), parse_mode="HTML")
+
+
+@require_admin
+async def gen_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate registration codes."""
+    count = 5
+    if context.args:
+        try:
+            count = int(context.args[0])
+            count = max(1, min(50, count))
+        except ValueError:
+            pass
+    
+    codes = db.create_codes(count)
+    text = f"🎫 <b>Созданы {len(codes)} кодов</b>\n\n"
+    for c in codes:
+        text += f"<code>{c}</code>\n"
+    
+    await update.message.reply_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+
+
+@require_admin
+async def show_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show unused codes."""
+    codes = db.get_unused_codes()
+    
+    if not codes:
+        text = "<i>Нет свободных кодов.</i>"
+    else:
+        text = f"🎫 <b>Коды</b> ({len(codes)})\n\n"
+        for c in codes:
+            text += f"<code>{c['code']}</code>\n"
+    
+    await update.message.reply_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+
+
+@require_admin
+async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add a new topic."""
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Используй: <code>/addtopic id название</code>",
+            parse_mode="HTML"
+        )
         return
     
+    topic_id = context.args[0]
+    name = " ".join(context.args[1:])
+    
+    topics = db.get_topics()
+    order = len(topics) + 1
+    
+    if db.add_topic(topic_id, name, order):
+        await update.message.reply_text(
+            f"✅ Тема добавлена: <b>{topic_id}</b> — {escape_html(name)}",
+            reply_markup=back_to_admin_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text(f"❌ Тема <code>{topic_id}</code> уже существует.", parse_mode="HTML")
+
+
+@require_admin
+async def del_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete a topic."""
+    if not context.args:
+        await update.message.reply_text("Используй: <code>/deltopic id</code>", parse_mode="HTML")
+        return
+    
+    topic_id = context.args[0]
+    
+    if db.delete_topic(topic_id):
+        await update.message.reply_text(
+            f"✅ Тема <code>{topic_id}</code> удалена.",
+            reply_markup=back_to_admin_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text("❌ Не удалось удалить. Есть задания?")
+
+
+@require_admin
+async def add_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start adding a task."""
+    topics = db.get_topics()
+    
+    if not topics:
+        await update.message.reply_text("❌ Сначала создай тему: /addtopic")
+        return ConversationHandler.END
+    
+    topics_list = "\n".join(f"• <code>{t['topic_id']}</code> — {escape_html(t['name'])}" for t in topics)
+    
+    await update.message.reply_text(
+        f"📝 <b>Добавление задания</b>\n\n"
+        f"Темы:\n{topics_list}\n\n"
+        "Отправь задание в формате:\n\n"
+        "<code>TOPIC: topic_id\n"
+        "TASK_ID: task_id\n"
+        "TITLE: Название\n"
+        "---DESCRIPTION---\n"
+        "Описание...\n"
+        "---TESTS---\n"
+        "def test():\n"
+        "    ...\n"
+        "test()</code>\n\n"
+        "Отмена: /cancel",
+        parse_mode="HTML"
+    )
+    return WAITING_TASK_DATA
+
+
+async def add_task_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and parse task data."""
+    text = update.message.text
+    
+    parsed = parse_task_format(text)
+    if not parsed:
+        await update.message.reply_text("❌ Неверный формат. Попробуй снова или /cancel")
+        return WAITING_TASK_DATA
+    
+    topic = db.get_topic(parsed["topic_id"])
+    if not topic:
+        await update.message.reply_text(f"❌ Тема <code>{parsed['topic_id']}</code> не найдена.", parse_mode="HTML")
+        return WAITING_TASK_DATA
+    
+    if db.get_task(parsed["task_id"]):
+        await update.message.reply_text(f"❌ Задание <code>{parsed['task_id']}</code> уже есть.", parse_mode="HTML")
+        return WAITING_TASK_DATA
+    
+    success = db.add_task(
+        task_id=parsed["task_id"],
+        topic_id=parsed["topic_id"],
+        title=parsed["title"],
+        description=parsed["description"],
+        test_code=parsed["test_code"]
+    )
+    
+    if success:
+        await update.message.reply_text(
+            f"✅ <b>Задание добавлено!</b>\n\n"
+            f"ID: <code>{parsed['task_id']}</code>\n"
+            f"Тема: {escape_html(topic['name'])}\n"
+            f"Название: {escape_html(parsed['title'])}",
+            reply_markup=back_to_admin_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text("❌ Ошибка.")
+    
+    return ConversationHandler.END
+
+
+@require_admin
+async def del_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete a task."""
+    if not context.args:
+        await update.message.reply_text("Используй: <code>/deltask task_id</code>", parse_mode="HTML")
+        return
+    
+    task_id = context.args[0]
+    task = db.get_task(task_id)
+    
+    if not task:
+        await update.message.reply_text(f"❌ Задание <code>{task_id}</code> не найдено.", parse_mode="HTML")
+        return
+    
+    if db.delete_task(task_id):
+        await update.message.reply_text(
+            f"✅ Задание <code>{task_id}</code> удалено.",
+            reply_markup=back_to_admin_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text("❌ Ошибка.")
+
+
+@require_admin
+async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all tasks."""
+    topics = db.get_topics()
+    
+    if not topics:
+        await update.message.reply_text("Нет тем.", reply_markup=back_to_admin_keyboard())
+        return
+    
+    text = "📚 <b>Все задания</b>\n\n"
+    
+    for topic in topics:
+        tasks = db.get_tasks_by_topic(topic["topic_id"])
+        text += f"<b>{escape_html(topic['name'])}</b>\n"
+        if tasks:
+            for task in tasks:
+                text += f"  • <code>{task['task_id']}</code>: {escape_html(task['title'])}\n"
+        else:
+            text += "  <i>(пусто)</i>\n"
+        text += "\n"
+    
+    await update.message.reply_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+
+
+@require_admin
+async def list_students(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all students."""
+    students = db.get_all_students_stats()
+    
+    if not students:
+        await update.message.reply_text("<i>Пока нет студентов.</i>", reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+        return
+    
+    text = "👥 <b>Студенты</b>\n\n"
+    for s in students:
+        name = escape_html(s.get("first_name") or s.get("username") or str(s["user_id"]))
+        text += f"• <b>{name}</b>: {s['solved_tasks']}/{s['total_tasks']} ✅, {s['total_submissions']} отпр.\n"
+    
+    await update.message.reply_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+
+
+@require_admin
+async def student_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show student details."""
+    if not context.args:
+        await update.message.reply_text("Используй: <code>/student user_id</code>", parse_mode="HTML")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("user_id должен быть числом.")
+        return
+    
+    student = db.get_student(user_id)
+    if not student:
+        await update.message.reply_text(f"Студент {user_id} не найден.")
+        return
+    
+    name = escape_html(student.get("first_name") or student.get("username") or str(user_id))
     stats = db.get_student_stats(student["id"])
     
     text = (
-        f"📊 **Твоя статистика**\n\n"
-        f"✅ Решено: {stats['solved_tasks']}/{stats['total_tasks']}\n"
-        f"📤 Отправок: {stats['total_submissions']}\n"
+        f"📋 <b>{name}</b>\n"
+        f"ID: <code>{user_id}</code>\n"
+        f"Код: <code>{student['code_used']}</code>\n\n"
+        f"✅ Решено: <b>{stats['solved_tasks']}</b>/{stats['total_tasks']}\n"
+        f"📤 Отправок: <b>{stats['total_submissions']}</b>"
     )
     
-    keyboard = [[InlineKeyboardButton("📚 К заданиям", callback_data="back:topics")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
 
 
 # ============== MAIN ==============
@@ -881,7 +1197,6 @@ def main():
     """Start the bot."""
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("❌ Set BOT_TOKEN!")
-        print("   export BOT_TOKEN='your_token'")
         sys.exit(1)
     
     db.init_db()
@@ -922,7 +1237,12 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("mystats", my_stats))
     
-    # Buttons
+    # Callbacks
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu:"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
+    app.add_handler(CallbackQueryHandler(student_callback, pattern="^student:"))
+    app.add_handler(CallbackQueryHandler(attempts_callback, pattern="^attempts:"))
+    app.add_handler(CallbackQueryHandler(code_callback, pattern="^code:"))
     app.add_handler(CallbackQueryHandler(topic_callback, pattern="^topic:"))
     app.add_handler(CallbackQueryHandler(task_callback, pattern="^task:"))
     app.add_handler(CallbackQueryHandler(submit_callback, pattern="^submit:"))
@@ -933,8 +1253,6 @@ def main():
     app.add_handler(MessageHandler(filters.Document.FileExtension("py"), handle_code_submission))
     
     print("🤖 Mentor Bot v2 starting...")
-    print("   First user becomes admin!")
-    
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
