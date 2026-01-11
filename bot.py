@@ -20,7 +20,7 @@ import database as db
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 EXEC_TIMEOUT = 10
-ADMIN_USERNAMES = ["qwerty1492"]
+ADMIN_USERNAMES = ["qwerty1492", "redd_dd"]
 BONUS_POINTS_PER_APPROVAL = 1
 
 
