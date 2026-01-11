@@ -1760,7 +1760,15 @@ def main():
     deleted = db.cleanup_old_code()
     if deleted:
         print(f"Cleaned {deleted} old submissions")
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("register", register))
@@ -1816,10 +1824,6 @@ def main():
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,  # Игнорировать старые сообщения при старте
-        read_timeout=30,
-        write_timeout=30,
-        connect_timeout=30,
-        pool_timeout=30,
     )
 
 
