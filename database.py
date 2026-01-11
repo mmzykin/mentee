@@ -86,6 +86,15 @@ def init_db():
                 user_id INTEGER UNIQUE NOT NULL,
                 added_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS assigned_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                task_id TEXT NOT NULL,
+                assigned_at TEXT NOT NULL,
+                FOREIGN KEY (student_id) REFERENCES students(id),
+                FOREIGN KEY (task_id) REFERENCES tasks(task_id),
+                UNIQUE(student_id, task_id)
+            );
         """)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(topics)").fetchall()}
         if "module_id" not in cols:
@@ -100,6 +109,8 @@ def init_db():
             conn.execute("ALTER TABLE submissions ADD COLUMN bonus_awarded INTEGER DEFAULT 0")
         if "code_deleted_at" not in cols:
             conn.execute("ALTER TABLE submissions ADD COLUMN code_deleted_at TEXT")
+        if "feedback" not in cols:
+            conn.execute("ALTER TABLE submissions ADD COLUMN feedback TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_student ON submissions(student_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_task ON submissions(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_topic ON tasks(topic_id)")
@@ -334,10 +345,25 @@ def get_student_submissions(student_id: int, task_id: str = None) -> List[Dict]:
         return [dict(r) for r in rows]
 
 
+def get_recent_submissions(student_id: int, limit: int = 10) -> List[Dict]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM submissions WHERE student_id = ? ORDER BY submitted_at DESC LIMIT ?", (student_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_submission_by_id(submission_id: int) -> Optional[Dict]:
     with get_db() as conn:
         row = conn.execute("SELECT * FROM submissions WHERE id = ?", (submission_id,)).fetchone()
         return dict(row) if row else None
+
+
+def delete_submission(submission_id: int) -> bool:
+    with get_db() as conn:
+        sub = conn.execute("SELECT student_id, approved, bonus_awarded FROM submissions WHERE id = ?", (submission_id,)).fetchone()
+        if sub and sub["approved"]:
+            conn.execute("UPDATE students SET bonus_points = bonus_points - ? WHERE id = ?", (sub["bonus_awarded"], sub["student_id"]))
+        result = conn.execute("DELETE FROM submissions WHERE id = ?", (submission_id,))
+        return result.rowcount > 0
 
 
 def has_solved(student_id: int, task_id: str) -> bool:
@@ -363,6 +389,12 @@ def unapprove_submission(submission_id: int) -> bool:
             return False
         conn.execute("UPDATE submissions SET approved = 0 WHERE id = ?", (submission_id,))
         conn.execute("UPDATE students SET bonus_points = bonus_points - ? WHERE id = ?", (sub["bonus_awarded"], sub["student_id"]))
+        return True
+
+
+def set_feedback(submission_id: int, feedback: str) -> bool:
+    with get_db() as conn:
+        conn.execute("UPDATE submissions SET feedback = ? WHERE id = ?", (feedback, submission_id))
         return True
 
 
@@ -412,6 +444,39 @@ def get_leaderboard(limit: int = 20) -> List[Dict]:
             r["score"] = r["solved"] + r["bonus_points"]
             result.append(r)
         return result
+
+
+def assign_task(student_id: int, task_id: str) -> bool:
+    with get_db() as conn:
+        try:
+            conn.execute("INSERT INTO assigned_tasks (student_id, task_id, assigned_at) VALUES (?, ?, ?)", (student_id, task_id, datetime.now().isoformat()))
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def unassign_task(student_id: int, task_id: str) -> bool:
+    with get_db() as conn:
+        result = conn.execute("DELETE FROM assigned_tasks WHERE student_id = ? AND task_id = ?", (student_id, task_id))
+        return result.rowcount > 0
+
+
+def get_assigned_tasks(student_id: int) -> List[Dict]:
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT t.*, a.assigned_at 
+            FROM assigned_tasks a 
+            JOIN tasks t ON a.task_id = t.task_id 
+            WHERE a.student_id = ? 
+            ORDER BY a.assigned_at DESC
+        """, (student_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def is_task_assigned(student_id: int, task_id: str) -> bool:
+    with get_db() as conn:
+        result = conn.execute("SELECT 1 FROM assigned_tasks WHERE student_id = ? AND task_id = ?", (student_id, task_id)).fetchone()
+        return result is not None
 
 
 init_db()
