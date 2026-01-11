@@ -24,7 +24,7 @@ ADMIN_USERNAMES = ["qwerty1492"]
 BONUS_POINTS_PER_APPROVAL = 1
 
 
-def main_menu_keyboard(is_admin=False, has_assigned=False):
+def main_menu_keyboard(is_admin=False, has_assigned=False, can_spin=False):
     keyboard = [
         [InlineKeyboardButton("📚 Задания", callback_data="modules:list")],
         [InlineKeyboardButton("🏆 Лидерборд", callback_data="menu:leaderboard")],
@@ -32,6 +32,8 @@ def main_menu_keyboard(is_admin=False, has_assigned=False):
     ]
     if has_assigned:
         keyboard.insert(1, [InlineKeyboardButton("📌 Назначенные мне", callback_data="myassigned:0")])
+    if can_spin:
+        keyboard.append([InlineKeyboardButton("🎰 Ежедневная рулетка", callback_data="dailyspin")])
     if is_admin:
         keyboard.append([InlineKeyboardButton("👑 Админ-панель", callback_data="menu:admin")])
     return InlineKeyboardMarkup(keyboard)
@@ -152,7 +154,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         student = db.get_student(user.id)
         if student:
             has_assigned = len(db.get_assigned_tasks(student["id"])) > 0
-            await update.message.reply_text(f"👋 <b>{name}</b>!", reply_markup=main_menu_keyboard(has_assigned=has_assigned), parse_mode="HTML")
+            can_spin = db.can_spin_daily(student["id"])
+            await update.message.reply_text(f"👋 <b>{name}</b>!", reply_markup=main_menu_keyboard(has_assigned=has_assigned, can_spin=can_spin), parse_mode="HTML")
         else:
             await update.message.reply_text(f"👋 <b>{name}</b>!\n\nРегистрация: /register КОД", parse_mode="HTML")
 
@@ -198,11 +201,13 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if action == "main":
         has_assigned = False
+        can_spin = False
         if not is_admin:
             student = db.get_student(user.id)
             if student:
                 has_assigned = len(db.get_assigned_tasks(student["id"])) > 0
-        await query.edit_message_text("🏠 <b>Главное меню</b>", reply_markup=main_menu_keyboard(is_admin, has_assigned), parse_mode="HTML")
+                can_spin = db.can_spin_daily(student["id"])
+        await query.edit_message_text("🏠 <b>Главное меню</b>", reply_markup=main_menu_keyboard(is_admin, has_assigned, can_spin), parse_mode="HTML")
     elif action == "mystats":
         student = db.get_student(user.id)
         if not student:
@@ -341,7 +346,9 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if timer_info.get("task_id") == task_id:
         elapsed = (datetime.now() - timer_info["start_time"]).total_seconds()
         mins, secs = divmod(int(elapsed), 60)
-        text += f"\n\n⏱ <b>Таймер: {mins:02d}:{secs:02d}</b>"
+        bet = timer_info.get("bet", 0)
+        bet_text = f" (ставка: {bet}⭐)" if bet > 0 else ""
+        text += f"\n\n⏱ <b>Таймер: {mins:02d}:{secs:02d}</b>{bet_text}"
     
     topic = db.get_topic(task["topic_id"])
     back_target = f"topic:{task['topic_id']}" if topic else "modules:list"
@@ -349,9 +356,14 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard_rows = [
         [InlineKeyboardButton("📤 Отправить", callback_data=f"submit:{task_id}")],
     ]
-    # Show timer button only if timer not running for this task
+    # Show timer/bet options only if timer not running for this task
     if timer_info.get("task_id") != task_id:
-        keyboard_rows.insert(0, [InlineKeyboardButton("⏱ Начать с таймером (+1⭐ за ≤10 мин)", callback_data=f"starttimer:{task_id}")])
+        keyboard_rows.insert(0, [
+            InlineKeyboardButton("⏱ +1⭐", callback_data=f"starttimer:{task_id}:0"),
+            InlineKeyboardButton("🎰 1→2⭐", callback_data=f"starttimer:{task_id}:1"),
+            InlineKeyboardButton("🎰 2→4⭐", callback_data=f"starttimer:{task_id}:2"),
+            InlineKeyboardButton("🎰 3→6⭐", callback_data=f"starttimer:{task_id}:3"),
+        ])
     else:
         keyboard_rows.insert(0, [InlineKeyboardButton("🔄 Сбросить таймер", callback_data=f"resettimer:{task_id}")])
     keyboard_rows.append([InlineKeyboardButton("« Назад", callback_data=back_target)])
@@ -360,13 +372,30 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def starttimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start timer for a task"""
+    """Start timer for a task with optional bet"""
     query = update.callback_query
-    await query.answer("⏱ Таймер запущен!")
-    task_id = query.data.split(":")[1]
+    parts = query.data.split(":")
+    task_id = parts[1]
+    bet = int(parts[2]) if len(parts) > 2 else 0
+    
+    # Check if student has enough points for bet
+    user = update.effective_user
+    student = db.get_student(user.id)
+    if bet > 0 and student:
+        stats = db.get_student_stats(student["id"])
+        if stats["bonus_points"] < bet:
+            await query.answer(f"❌ Недостаточно баллов! У тебя: {stats['bonus_points']}⭐", show_alert=True)
+            return
+        # Deduct bet immediately
+        db.add_bonus_points(student["id"], -bet)
+    
+    bet_text = f" (ставка {bet}⭐)" if bet > 0 else ""
+    await query.answer(f"⏱ Таймер запущен!{bet_text}")
+    
     context.user_data["task_timer"] = {
         "task_id": task_id,
-        "start_time": datetime.now()
+        "start_time": datetime.now(),
+        "bet": bet
     }
     # Refresh task view to show timer
     query.data = f"task:{task_id}"
@@ -376,12 +405,104 @@ async def starttimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def resettimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reset timer for a task"""
     query = update.callback_query
-    await query.answer("⏱ Таймер сброшен!")
     task_id = query.data.split(":")[1]
+    
+    # Refund bet if timer had a bet
+    timer_info = context.user_data.get("task_timer", {})
+    if timer_info.get("task_id") == task_id and timer_info.get("bet", 0) > 0:
+        user = update.effective_user
+        student = db.get_student(user.id)
+        if student:
+            db.add_bonus_points(student["id"], timer_info["bet"])
+        await query.answer(f"⏱ Таймер сброшен! Ставка {timer_info['bet']}⭐ возвращена")
+    else:
+        await query.answer("⏱ Таймер сброшен!")
+    
     context.user_data.pop("task_timer", None)
     # Refresh task view
     query.data = f"task:{task_id}"
     await task_callback(update, context)
+
+
+async def dailyspin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Daily roulette spin"""
+    query = update.callback_query
+    user = update.effective_user
+    student = db.get_student(user.id)
+    
+    if not student:
+        await query.answer("⛔ Не зарегистрирован")
+        return
+    
+    if not db.can_spin_daily(student["id"]):
+        await query.answer("🎰 Уже крутил сегодня! Приходи завтра", show_alert=True)
+        return
+    
+    await query.answer()
+    
+    # Spin animation message
+    spin_msg = await query.edit_message_text("🎰 <b>Крутим рулетку...</b>\n\n🎡 🎡 🎡", parse_mode="HTML")
+    
+    import asyncio
+    await asyncio.sleep(1)
+    
+    points = db.do_daily_spin(student["id"])
+    
+    if points > 0:
+        result_text = f"🎉 <b>ВЫИГРЫШ!</b>\n\n+{points}⭐ бонус!"
+        emoji = "🎉" * points
+    elif points == 0:
+        result_text = "😐 <b>Пусто</b>\n\n0 баллов. Повезёт завтра!"
+        emoji = "🤷"
+    else:
+        result_text = f"💀 <b>Неудача!</b>\n\n{points}⭐"
+        emoji = "😢"
+    
+    stats = db.get_student_stats(student["id"])
+    result_text += f"\n\nТвой баланс: <b>{stats['bonus_points']}⭐</b>"
+    
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("« Главное меню", callback_data="menu:main")]])
+    await spin_msg.edit_text(f"🎰 <b>Рулетка</b>\n\n{emoji}\n\n{result_text}", reply_markup=keyboard, parse_mode="HTML")
+
+
+async def gamble_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Post-solve gambling - 50/50 to double or lose"""
+    query = update.callback_query
+    user = update.effective_user
+    student = db.get_student(user.id)
+    
+    if not student:
+        await query.answer("⛔")
+        return
+    
+    amount = int(query.data.split(":")[1])
+    stats = db.get_student_stats(student["id"])
+    
+    if stats["bonus_points"] < amount:
+        await query.answer(f"❌ Недостаточно баллов! У тебя: {stats['bonus_points']}⭐", show_alert=True)
+        return
+    
+    await query.answer()
+    
+    won, new_balance = db.gamble_points(student["id"], amount)
+    
+    if won:
+        result = f"🎉 <b>УДВОИЛ!</b>\n\n+{amount}⭐\nБаланс: <b>{new_balance}⭐</b>"
+    else:
+        result = f"💀 <b>Проиграл!</b>\n\n-{amount}⭐\nБаланс: <b>{new_balance}⭐</b>"
+    
+    # Show gamble again if has points
+    keyboard_rows = [
+        [InlineKeyboardButton("🎉 К заданиям", callback_data="modules:list")],
+        [InlineKeyboardButton("🏆 Лидерборд", callback_data="menu:leaderboard")]
+    ]
+    if new_balance >= 1:
+        keyboard_rows.insert(0, [InlineKeyboardButton("🎲 Рискнуть ещё 1⭐", callback_data="gamble:1")])
+    if new_balance >= 2:
+        keyboard_rows.insert(1, [InlineKeyboardButton("🎲 Рискнуть 2⭐", callback_data="gamble:2")])
+    
+    keyboard = InlineKeyboardMarkup(keyboard_rows)
+    await query.edit_message_text(f"🎲 <b>Рулетка</b>\n\n{result}", reply_markup=keyboard, parse_mode="HTML")
 
 
 async def submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1363,14 +1484,16 @@ async def process_submission(update: Update, context: ContextTypes.DEFAULT_TYPE,
         code = "\n".join(lines)
     del context.user_data["pending_task"]
     
-    # Check timer
+    # Check timer and bet
     timer_info = context.user_data.get("task_timer", {})
     timer_bonus = False
     timer_text = ""
+    bet = 0
     if timer_info.get("task_id") == task_id:
         elapsed = (datetime.now() - timer_info["start_time"]).total_seconds()
         mins, secs = divmod(int(elapsed), 60)
         timer_text = f"\n⏱ Время: {mins:02d}:{secs:02d}"
+        bet = timer_info.get("bet", 0)
         if elapsed <= 600:  # 10 minutes
             timer_bonus = True
         # Clear timer after submission
@@ -1386,24 +1509,56 @@ async def process_submission(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if student["id"] != 0:
         sub_id = db.add_submission(student["id"], task_id, code, passed, output)
     safe_output = escape_html(output[:1500])
+    
     if passed:
         bonus_text = ""
-        # Award timer bonus if passed within 10 minutes
-        if timer_bonus and student["id"] != 0:
-            db.add_bonus_points(student["id"], 1)
-            bonus_text = "\n🏃 <b>+1⭐ бонус за скорость!</b>"
+        chest_text = ""
         
-        keyboard = InlineKeyboardMarkup([
+        if student["id"] != 0:
+            # Award timer bonus if passed within 10 minutes
+            if timer_bonus:
+                base_bonus = 1 + (bet * 2)  # 1 + double the bet
+                db.add_bonus_points(student["id"], base_bonus)
+                if bet > 0:
+                    bonus_text = f"\n🎰 <b>+{base_bonus}⭐ выигрыш!</b> (ставка {bet}→{base_bonus})"
+                else:
+                    bonus_text = "\n🏃 <b>+1⭐ бонус за скорость!</b>"
+            elif bet > 0:
+                # Lost bet - time exceeded (bet was already deducted)
+                bonus_text = f"\n😢 Ставка {bet}⭐ проиграна (>10 мин)"
+            
+            # Increment streak and check for chest
+            new_streak = db.increment_streak(student["id"])
+            if new_streak % 5 == 0:
+                chest_bonus = db.open_chest()
+                db.add_bonus_points(student["id"], chest_bonus)
+                chest_text = f"\n🎁 <b>СУНДУК! +{chest_bonus}⭐</b> (серия {new_streak})"
+        
+        # Show gamble option
+        stats = db.get_student_stats(student["id"]) if student["id"] != 0 else {"bonus_points": 0}
+        keyboard_rows = [
             [InlineKeyboardButton("🎉 К заданиям", callback_data="modules:list")],
             [InlineKeyboardButton("🏆 Лидерборд", callback_data="menu:leaderboard")]
-        ])
-        result = f"✅ <b>Решено!</b> (#{sub_id}){timer_text}{bonus_text}\n\n<pre>{safe_output}</pre>"
+        ]
+        if stats["bonus_points"] >= 1:
+            keyboard_rows.insert(0, [InlineKeyboardButton("🎲 Рискнуть 1⭐ (50/50)", callback_data="gamble:1")])
+        keyboard = InlineKeyboardMarkup(keyboard_rows)
+        
+        result = f"✅ <b>Решено!</b> (#{sub_id}){timer_text}{bonus_text}{chest_text}\n\n<pre>{safe_output}</pre>"
     else:
+        # Reset streak on failure
+        if student["id"] != 0:
+            db.reset_streak(student["id"])
+        
+        bet_text = ""
+        if bet > 0:
+            bet_text = f"\n😢 Ставка {bet}⭐ проиграна"
+        
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Ещё", callback_data=f"submit:{task_id}")],
             [InlineKeyboardButton("« Задание", callback_data=f"task:{task_id}")]
         ])
-        result = f"❌ <b>Не пройдено</b> (#{sub_id}){timer_text}\n\n<pre>{safe_output}</pre>"
+        result = f"❌ <b>Не пройдено</b> (#{sub_id}){timer_text}{bet_text}\n\n<pre>{safe_output}</pre>"
     await checking.edit_text(result, reply_markup=keyboard, parse_mode="HTML")
 
 
@@ -1518,6 +1673,8 @@ def main():
     app.add_handler(CallbackQueryHandler(task_callback, pattern="^task:"))
     app.add_handler(CallbackQueryHandler(starttimer_callback, pattern="^starttimer:"))
     app.add_handler(CallbackQueryHandler(resettimer_callback, pattern="^resettimer:"))
+    app.add_handler(CallbackQueryHandler(dailyspin_callback, pattern="^dailyspin"))
+    app.add_handler(CallbackQueryHandler(gamble_callback, pattern="^gamble:"))
     app.add_handler(CallbackQueryHandler(submit_callback, pattern="^submit:"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
     app.add_handler(CallbackQueryHandler(create_callback, pattern="^create:"))

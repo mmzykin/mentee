@@ -108,6 +108,10 @@ def init_db():
             conn.execute("ALTER TABLE students ADD COLUMN archive_reason TEXT")
         if "archive_feedback" not in cols:
             conn.execute("ALTER TABLE students ADD COLUMN archive_feedback TEXT")
+        if "last_daily_spin" not in cols:
+            conn.execute("ALTER TABLE students ADD COLUMN last_daily_spin TEXT")
+        if "solve_streak" not in cols:
+            conn.execute("ALTER TABLE students ADD COLUMN solve_streak INTEGER DEFAULT 0")
         cols = {row[1] for row in conn.execute("PRAGMA table_info(submissions)").fetchall()}
         if "approved" not in cols:
             conn.execute("ALTER TABLE submissions ADD COLUMN approved INTEGER DEFAULT 0")
@@ -537,6 +541,90 @@ def get_active_students_stats() -> List[Dict]:
         stats = get_student_stats(student["id"])
         result.append({**student, **stats})
     return result
+
+
+# === GAMBLING FUNCTIONS ===
+
+def can_spin_daily(student_id: int) -> bool:
+    """Check if student can use daily roulette"""
+    with get_db() as conn:
+        row = conn.execute("SELECT last_daily_spin FROM students WHERE id = ?", (student_id,)).fetchone()
+        if not row or not row["last_daily_spin"]:
+            return True
+        last_spin = datetime.fromisoformat(row["last_daily_spin"])
+        today = datetime.now().date()
+        return last_spin.date() < today
+
+
+def do_daily_spin(student_id: int) -> int:
+    """Do daily spin, returns points won (can be negative)"""
+    import random
+    with get_db() as conn:
+        # 50% → +1, 25% → +2, 15% → 0, 10% → -1
+        roll = random.randint(1, 100)
+        if roll <= 50:
+            points = 1
+        elif roll <= 75:
+            points = 2
+        elif roll <= 90:
+            points = 0
+        else:
+            points = -1
+        
+        conn.execute("UPDATE students SET last_daily_spin = ? WHERE id = ?", 
+                     (datetime.now().isoformat(), student_id))
+        if points != 0:
+            conn.execute("UPDATE students SET bonus_points = MAX(0, bonus_points + ?) WHERE id = ?", 
+                         (points, student_id))
+        return points
+
+
+def get_solve_streak(student_id: int) -> int:
+    """Get current solve streak"""
+    with get_db() as conn:
+        row = conn.execute("SELECT solve_streak FROM students WHERE id = ?", (student_id,)).fetchone()
+        return row["solve_streak"] if row and row["solve_streak"] else 0
+
+
+def increment_streak(student_id: int) -> int:
+    """Increment streak and return new value"""
+    with get_db() as conn:
+        conn.execute("UPDATE students SET solve_streak = COALESCE(solve_streak, 0) + 1 WHERE id = ?", (student_id,))
+        row = conn.execute("SELECT solve_streak FROM students WHERE id = ?", (student_id,)).fetchone()
+        return row["solve_streak"] if row else 1
+
+
+def reset_streak(student_id: int):
+    """Reset streak to 0"""
+    with get_db() as conn:
+        conn.execute("UPDATE students SET solve_streak = 0 WHERE id = ?", (student_id,))
+
+
+def open_chest() -> int:
+    """Open chest, returns random bonus 1-5"""
+    import random
+    return random.randint(1, 5)
+
+
+def gamble_points(student_id: int, amount: int) -> tuple[bool, int]:
+    """50/50 gamble - double or lose. Returns (won, new_balance)"""
+    import random
+    with get_db() as conn:
+        row = conn.execute("SELECT bonus_points FROM students WHERE id = ?", (student_id,)).fetchone()
+        current = row["bonus_points"] if row else 0
+        
+        if current < amount:
+            return False, current
+        
+        won = random.choice([True, False])
+        if won:
+            change = amount  # win = +amount (so total is doubled)
+        else:
+            change = -amount  # lose the bet
+        
+        conn.execute("UPDATE students SET bonus_points = MAX(0, bonus_points + ?) WHERE id = ?", 
+                     (change, student_id))
+        return won, current + change
 
 
 init_db()
