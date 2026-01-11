@@ -4,8 +4,15 @@ import re
 import tempfile
 import subprocess
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+# UTC+3 (Moscow time)
+MSK = timezone(timedelta(hours=3))
+
+def now_msk() -> datetime:
+    """Get current time in Moscow timezone (UTC+3)"""
+    return datetime.now(MSK).replace(tzinfo=None)
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -573,7 +580,7 @@ async def show_task_view(query, context, task_id: str):
     keyboard_rows = []
     
     if timer_active:
-        elapsed = (datetime.now() - timer_info["start_time"]).total_seconds()
+        elapsed = (now_msk() - timer_info["start_time"]).total_seconds()
         mins, secs = divmod(int(elapsed), 60)
         bet = timer_info.get("bet", 0)
         bet_text = f" (ставка: {bet}⭐)" if bet > 0 else ""
@@ -632,7 +639,7 @@ async def starttimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     context.user_data["task_timer"] = {
         "task_id": task_id,
-        "start_time": datetime.now(),
+        "start_time": now_msk(),
         "bet": bet
     }
     # Refresh task view to show timer
@@ -759,7 +766,7 @@ async def submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     timer_text = ""
     timer_info = context.user_data.get("task_timer", {})
     if timer_info.get("task_id") == task_id:
-        elapsed = (datetime.now() - timer_info["start_time"]).total_seconds()
+        elapsed = (now_msk() - timer_info["start_time"]).total_seconds()
         mins, secs = divmod(int(elapsed), 60)
         timer_text = f"\n⏱ Таймер: <b>{mins:02d}:{secs:02d}</b>"
         if elapsed <= 600:
@@ -2735,7 +2742,7 @@ async def process_submission(update: Update, context: ContextTypes.DEFAULT_TYPE,
     timer_text = ""
     bet = 0
     if timer_info.get("task_id") == task_id:
-        elapsed = (datetime.now() - timer_info["start_time"]).total_seconds()
+        elapsed = (now_msk() - timer_info["start_time"]).total_seconds()
         mins, secs = divmod(int(elapsed), 60)
         timer_text = f"\n⏱ Время: {mins:02d}:{secs:02d}"
         bet = timer_info.get("bet", 0)

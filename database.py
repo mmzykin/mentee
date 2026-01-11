@@ -1,13 +1,20 @@
 import sqlite3
 import secrets
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict
 from contextlib import contextmanager
 
 DB_PATH = Path("data/mentor.db")
 CODE_RETENTION_DAYS = 7
+
+# UTC+3 (Moscow time)
+MSK = timezone(timedelta(hours=3))
+
+def now_msk() -> datetime:
+    """Get current time in Moscow timezone (UTC+3)"""
+    return datetime.now(MSK).replace(tzinfo=None)
 
 
 def generate_code(length: int = 8) -> str:
@@ -573,7 +580,7 @@ def can_spin_daily(student_id: int) -> bool:
         if not row or not row["last_daily_spin"]:
             return True
         last_spin = datetime.fromisoformat(row["last_daily_spin"])
-        today = datetime.now().date()
+        today = now_msk().date()
         return last_spin.date() < today
 
 
@@ -593,7 +600,7 @@ def do_daily_spin(student_id: int) -> int:
             points = -1
         
         conn.execute("UPDATE students SET last_daily_spin = ? WHERE id = ?", 
-                     (datetime.now().isoformat(), student_id))
+                     (now_msk().isoformat(), student_id))
         if points != 0:
             conn.execute("UPDATE students SET bonus_points = MAX(0, bonus_points + ?) WHERE id = ?", 
                          (points, student_id))
@@ -818,7 +825,7 @@ def create_meeting(student_id: Optional[int], title: str, meeting_link: str,
 def get_meetings(student_id: int = None, include_past: bool = False) -> List[Dict]:
     init_meetings()
     with get_db() as conn:
-        now = datetime.now().isoformat()
+        now = now_msk().isoformat()
         if student_id:
             if include_past:
                 rows = conn.execute(
@@ -863,7 +870,7 @@ def get_pending_reminders() -> List[Dict]:
     """Get meetings that need reminders sent"""
     init_meetings()
     with get_db() as conn:
-        now = datetime.now()
+        now = now_msk()
         in_24h = (now + timedelta(hours=24)).isoformat()
         in_1h = (now + timedelta(hours=1)).isoformat()
         
@@ -1213,7 +1220,7 @@ def is_quiz_expired(session_id: int) -> bool:
         
         started = datetime.fromisoformat(session['started_at'])
         limit = session['time_limit_seconds'] or 600
-        return datetime.now() > started + timedelta(seconds=limit)
+        return now_msk() > started + timedelta(seconds=limit)
 
 
 def get_quiz_time_remaining(session_id: int) -> int:
@@ -1225,7 +1232,7 @@ def get_quiz_time_remaining(session_id: int) -> int:
         
         started = datetime.fromisoformat(session['started_at'])
         limit = session['time_limit_seconds'] or 600
-        elapsed = (datetime.now() - started).total_seconds()
+        elapsed = (now_msk() - started).total_seconds()
         return max(0, int(limit - elapsed))
 
 
