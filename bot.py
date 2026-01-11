@@ -24,12 +24,14 @@ ADMIN_USERNAMES = ["qwerty1492"]
 BONUS_POINTS_PER_APPROVAL = 1
 
 
-def main_menu_keyboard(is_admin=False):
+def main_menu_keyboard(is_admin=False, has_assigned=False):
     keyboard = [
         [InlineKeyboardButton("📚 Задания", callback_data="modules:list")],
         [InlineKeyboardButton("🏆 Лидерборд", callback_data="menu:leaderboard")],
         [InlineKeyboardButton("📊 Моя статистика", callback_data="menu:mystats")],
     ]
+    if has_assigned:
+        keyboard.insert(1, [InlineKeyboardButton("📌 Назначенные мне", callback_data="myassigned:0")])
     if is_admin:
         keyboard.append([InlineKeyboardButton("👑 Админ-панель", callback_data="menu:admin")])
     return InlineKeyboardMarkup(keyboard)
@@ -146,10 +148,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin = db.is_admin(user.id)
     if is_admin:
         await update.message.reply_text(f"👑 <b>{name}</b>!", reply_markup=main_menu_keyboard(is_admin=True), parse_mode="HTML")
-    elif db.get_student(user.id):
-        await update.message.reply_text(f"👋 <b>{name}</b>!", reply_markup=main_menu_keyboard(), parse_mode="HTML")
     else:
-        await update.message.reply_text(f"👋 <b>{name}</b>!\n\nРегистрация: /register КОД", parse_mode="HTML")
+        student = db.get_student(user.id)
+        if student:
+            has_assigned = len(db.get_assigned_tasks(student["id"])) > 0
+            await update.message.reply_text(f"👋 <b>{name}</b>!", reply_markup=main_menu_keyboard(has_assigned=has_assigned), parse_mode="HTML")
+        else:
+            await update.message.reply_text(f"👋 <b>{name}</b>!\n\nРегистрация: /register КОД", parse_mode="HTML")
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,14 +197,18 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = query.data.split(":")[1]
     
     if action == "main":
-        await query.edit_message_text("🏠 <b>Главное меню</b>", reply_markup=main_menu_keyboard(is_admin), parse_mode="HTML")
+        has_assigned = False
+        if not is_admin:
+            student = db.get_student(user.id)
+            if student:
+                has_assigned = len(db.get_assigned_tasks(student["id"])) > 0
+        await query.edit_message_text("🏠 <b>Главное меню</b>", reply_markup=main_menu_keyboard(is_admin, has_assigned), parse_mode="HTML")
     elif action == "mystats":
         student = db.get_student(user.id)
         if not student:
             await query.edit_message_text("Не зарегистрирован.", reply_markup=back_to_menu_keyboard())
             return
         stats = db.get_student_stats(student["id"])
-        assigned = db.get_assigned_tasks(student["id"])
         text = (
             f"📊 <b>Моя статистика</b>\n\n"
             f"✅ Решено: <b>{stats['solved_tasks']}</b>/{stats['total_tasks']}\n"
@@ -207,11 +216,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎖 Аппрувов: <b>{stats['approved_count']}</b>\n"
             f"📤 Отправок: <b>{stats['total_submissions']}</b>"
         )
-        if assigned:
-            text += f"\n📌 Назначено: <b>{len(assigned)}</b>"
         keyboard = [
             [InlineKeyboardButton("📋 Мои попытки", callback_data="myattempts:0")],
-            [InlineKeyboardButton("📌 Назначенные мне", callback_data="myassigned:0")],
             [InlineKeyboardButton("« Главное меню", callback_data="menu:main")]
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -978,7 +984,7 @@ async def myassigned_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if not assigned:
         text = "📌 <b>Назначенные мне задания</b>\n\n<i>Пока ничего не назначено</i>"
-        keyboard = [[InlineKeyboardButton("« Назад", callback_data="menu:mystats")]]
+        keyboard = [[InlineKeyboardButton("« Главное меню", callback_data="menu:main")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return
     
@@ -990,7 +996,7 @@ async def myassigned_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         btn = f"{status} {t['title']}"
         keyboard.append([InlineKeyboardButton(btn, callback_data=f"task:{t['task_id']}")])
     
-    keyboard.append([InlineKeyboardButton("« Назад", callback_data="menu:mystats")])
+    keyboard.append([InlineKeyboardButton("« Главное меню", callback_data="menu:main")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
