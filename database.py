@@ -84,6 +84,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS admins (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER UNIQUE NOT NULL,
+                name TEXT,
                 added_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS assigned_tasks (
@@ -128,6 +129,9 @@ def init_db():
             conn.execute("ALTER TABLE submissions ADD COLUMN code_deleted_at TEXT")
         if "feedback" not in cols:
             conn.execute("ALTER TABLE submissions ADD COLUMN feedback TEXT")
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(admins)").fetchall()}
+        if "name" not in cols:
+            conn.execute("ALTER TABLE admins ADD COLUMN name TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_student ON submissions(student_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_task ON submissions(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_topic ON tasks(topic_id)")
@@ -159,13 +163,23 @@ def is_admin(user_id: int) -> bool:
         return result is not None
 
 
-def add_admin(user_id: int) -> bool:
+def add_admin(user_id: int, name: str = None) -> bool:
     with get_db() as conn:
         try:
-            conn.execute("INSERT INTO admins (user_id, added_at) VALUES (?, ?)", (user_id, datetime.now().isoformat()))
+            conn.execute("INSERT INTO admins (user_id, name, added_at) VALUES (?, ?, ?)", 
+                        (user_id, name, datetime.now().isoformat()))
             return True
         except sqlite3.IntegrityError:
+            # Update name if admin already exists
+            if name:
+                conn.execute("UPDATE admins SET name = ? WHERE user_id = ?", (name, user_id))
             return False
+
+
+def update_admin_name(user_id: int, name: str):
+    """Update admin's display name"""
+    with get_db() as conn:
+        conn.execute("UPDATE admins SET name = ? WHERE user_id = ?", (name, user_id))
 
 
 def get_admin_count() -> int:

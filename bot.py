@@ -272,13 +272,17 @@ def require_registered(func):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     name = escape_html(user.first_name)
+    admin_name = user.first_name or user.username or str(user.id)
     if user.username and user.username.lower() in ADMIN_USERNAMES:
         if not db.is_admin(user.id):
-            db.add_admin(user.id)
+            db.add_admin(user.id, admin_name)
             await update.message.reply_text(f"👑 <b>{name}</b>, ты теперь админ!", reply_markup=main_menu_keyboard(is_admin=True), parse_mode="HTML")
             return
+        else:
+            # Update name for existing admin
+            db.update_admin_name(user.id, admin_name)
     if db.get_admin_count() == 0:
-        db.add_admin(user.id)
+        db.add_admin(user.id, admin_name)
         await update.message.reply_text(f"👑 <b>{name}</b>, ты первый — теперь админ!", reply_markup=main_menu_keyboard(is_admin=True), parse_mode="HTML")
         return
     is_admin = db.is_admin(user.id)
@@ -1138,14 +1142,13 @@ async def student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = db.get_student_stats(student["id"])
     assigned = db.get_assigned_tasks(student["id"])
     mentors = db.get_student_mentors(student["id"])
+    admins = db.get_all_admins()
+    admin_names = {a['user_id']: a.get('name') or f"ID:{a['user_id']}" for a in admins}
     
     mentors_text = ""
     if mentors:
-        mentor_names = []
-        for m in mentors:
-            # Try to get mentor info from context bot
-            mentor_names.append(f"ID:{m['mentor_user_id']}")
-        mentors_text = f"\n👨‍🏫 Менторы: {len(mentors)}"
+        mentor_list = [admin_names.get(m['mentor_user_id'], f"ID:{m['mentor_user_id']}") for m in mentors]
+        mentors_text = f"\n👨‍🏫 Менторы: {', '.join(mentor_list)}"
     else:
         mentors_text = "\n👨‍🏫 Менторы: <i>не назначены</i>"
     
@@ -1688,15 +1691,8 @@ async def editname_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def mentors_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manage mentors for a student"""
-    query = update.callback_query
-    await safe_answer(query)
-    if not db.is_admin(update.effective_user.id):
-        await query.edit_message_text("⛔")
-        return
-    
-    student_id = int(query.data.split(":")[1])
+async def show_mentors_view(query, student_id: int):
+    """Helper to render mentors view"""
     student = db.get_student_by_id(student_id)
     if not student:
         await query.edit_message_text("Не найден.")
@@ -1706,12 +1702,16 @@ async def mentors_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mentors = db.get_student_mentors(student_id)
     admins = db.get_all_admins()
     
+    # Create lookup for admin names
+    admin_names = {a['user_id']: a.get('name') or f"ID:{a['user_id']}" for a in admins}
+    
     text = f"👨‍🏫 <b>Менторы студента {name}</b>\n\n"
     
     if mentors:
         text += "<b>Назначенные менторы:</b>\n"
         for m in mentors:
-            text += f"• ID: <code>{m['mentor_user_id']}</code>\n"
+            mentor_name = admin_names.get(m['mentor_user_id'], f"ID:{m['mentor_user_id']}")
+            text += f"• {escape_html(mentor_name)}\n"
     else:
         text += "<i>Менторы не назначены</i>\n"
     
@@ -1722,14 +1722,27 @@ async def mentors_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_mentor = any(m['mentor_user_id'] == admin['user_id'] for m in mentors)
         emoji = "✅" if is_mentor else "➕"
         action = "unmentor" if is_mentor else "addmentor"
+        admin_display = admin.get('name') or f"ID:{admin['user_id']}"
         keyboard.append([InlineKeyboardButton(
-            f"{emoji} ID:{admin['user_id']}", 
+            f"{emoji} {admin_display}", 
             callback_data=f"{action}:{student_id}:{admin['user_id']}"
         )])
     
     keyboard.append([InlineKeyboardButton("« Назад", callback_data=f"student:{student['user_id']}")])
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def mentors_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manage mentors for a student"""
+    query = update.callback_query
+    await safe_answer(query)
+    if not db.is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔")
+        return
+    
+    student_id = int(query.data.split(":")[1])
+    await show_mentors_view(query, student_id)
 
 
 async def addmentor_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1749,11 +1762,7 @@ async def addmentor_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await safe_answer(query, "Уже назначен", show_alert=True)
     
-    # Refresh mentors view
-    student = db.get_student_by_id(student_id)
-    if student:
-        query.data = f"mentors:{student_id}"
-        await mentors_callback(update, context)
+    await show_mentors_view(query, student_id)
 
 
 async def unmentor_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1771,11 +1780,7 @@ async def unmentor_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if db.unassign_mentor(student_id, mentor_user_id):
         await safe_answer(query, "❌ Ментор удалён", show_alert=True)
     
-    # Refresh mentors view
-    student = db.get_student_by_id(student_id)
-    if student:
-        query.data = f"mentors:{student_id}"
-        await mentors_callback(update, context)
+    await show_mentors_view(query, student_id)
 
 
 async def hired_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
