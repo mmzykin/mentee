@@ -867,7 +867,11 @@ async def code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not sub:
         await query.edit_message_text("Не найден.")
         return
-    status = "✅" if sub["passed"] else "❌"
+    
+    # Check if already marked as cheated
+    is_cheated = sub.get("feedback") and "🚨 СПИСАНО" in sub.get("feedback", "")
+    
+    status = "🚨" if is_cheated else ("✅" if sub["passed"] else "❌")
     approved = " ⭐Аппрувнуто" if sub.get("approved") else ""
     code = sub["code"] or "[удалён]"
     if len(code) > 2500:
@@ -875,14 +879,31 @@ async def code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"<b>{status}{approved}</b>\nID: <code>#{sub['id']}</code>\nЗадание: <code>{sub['task_id']}</code>\nВремя: {sub['submitted_at'][:16]}\n\n<pre>{escape_html(code)}</pre>"
     if sub.get("feedback"):
         text += f"\n\n💬 <b>Фидбек:</b>\n{escape_html(sub['feedback'])}"
+    
+    # Show student's current bonus
+    student = db.get_student_by_id(sub["student_id"])
+    if student:
+        bonus = db.get_student_bonus(student["id"])
+        text += f"\n\n👤 Баланс студента: <b>{bonus}⭐</b>"
+    
     keyboard = []
     row1 = []
-    if sub["passed"] and not sub.get("approved"):
+    if sub["passed"] and not sub.get("approved") and not is_cheated:
         row1.append(InlineKeyboardButton("⭐ Аппрув", callback_data=f"approve:{sub_id}"))
     elif sub.get("approved"):
         row1.append(InlineKeyboardButton("❌ Убрать аппрув", callback_data=f"unapprove:{sub_id}"))
     row1.append(InlineKeyboardButton("💬 Фидбек", callback_data=f"feedback:{sub_id}"))
     keyboard.append(row1)
+    
+    # GOD MODE - Cheater punishment (only for passed solutions that aren't already marked)
+    if sub["passed"] and not is_cheated:
+        keyboard.append([
+            InlineKeyboardButton("🚨 Списал!", callback_data=f"cheater:{sub_id}:0"),
+            InlineKeyboardButton("🚨 -1⭐", callback_data=f"cheater:{sub_id}:1"),
+            InlineKeyboardButton("🚨 -3⭐", callback_data=f"cheater:{sub_id}:3"),
+            InlineKeyboardButton("🚨 -5⭐", callback_data=f"cheater:{sub_id}:5"),
+        ])
+    
     keyboard.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"delsub:{sub_id}")])
     keyboard.append([InlineKeyboardButton("« Назад", callback_data=f"recent:{sub['student_id']}")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -922,6 +943,43 @@ async def unapprove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     sub_id = int(query.data.split(":")[1])
     db.unapprove_submission(sub_id)
     await query.answer("Отменено.", show_alert=True)
+    await code_callback(update, context)
+
+
+async def cheater_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """GOD MODE: Punish cheater - mark as failed and remove points"""
+    query = update.callback_query
+    if not db.is_admin(update.effective_user.id):
+        await query.answer("⛔")
+        return
+    
+    parts = query.data.split(":")
+    sub_id = int(parts[1])
+    penalty = int(parts[2]) if len(parts) > 2 else 0
+    
+    sub = db.get_submission_by_id(sub_id)
+    if not sub:
+        await query.answer("Не найден.")
+        return
+    
+    if db.punish_cheater(sub_id, penalty):
+        student = db.get_student_by_id(sub["student_id"])
+        penalty_text = f" и -{penalty}⭐" if penalty > 0 else ""
+        await query.answer(f"🚨 Списывание отмечено{penalty_text}!", show_alert=True)
+        
+        # Notify student about punishment
+        if student:
+            task = db.get_task(sub["task_id"])
+            task_name = task["title"] if task else sub["task_id"]
+            await notify_student(
+                context, student["user_id"],
+                f"🚨 <b>Обнаружено списывание!</b>\n\n"
+                f"Задание: <b>{escape_html(task_name)}</b>\n"
+                f"Решение аннулировано" + (f", штраф: -{penalty}⭐" if penalty > 0 else "")
+            )
+    else:
+        await query.answer("Ошибка.", show_alert=True)
+    
     await code_callback(update, context)
 
 
@@ -1725,6 +1783,7 @@ def main():
     app.add_handler(CallbackQueryHandler(code_callback, pattern="^code:"))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve:"))
     app.add_handler(CallbackQueryHandler(unapprove_callback, pattern="^unapprove:"))
+    app.add_handler(CallbackQueryHandler(cheater_callback, pattern="^cheater:"))
     app.add_handler(CallbackQueryHandler(feedback_callback, pattern="^feedback:"))
     app.add_handler(CallbackQueryHandler(delsub_callback, pattern="^delsub:"))
     app.add_handler(CallbackQueryHandler(assign_callback, pattern="^assign:"))

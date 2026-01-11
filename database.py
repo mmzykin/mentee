@@ -606,6 +606,39 @@ def open_chest() -> int:
     return random.randint(1, 5)
 
 
+def punish_cheater(submission_id: int, penalty_points: int) -> bool:
+    """Mark submission as cheated and penalize student"""
+    with get_db() as conn:
+        sub = conn.execute("SELECT student_id, passed, approved, bonus_awarded FROM submissions WHERE id = ?", (submission_id,)).fetchone()
+        if not sub:
+            return False
+        
+        # Mark as failed/cheated
+        conn.execute("UPDATE submissions SET passed = 0, approved = 0, feedback = COALESCE(feedback || '\n', '') || '🚨 СПИСАНО' WHERE id = ?", (submission_id,))
+        
+        # Remove any bonus that was awarded for approval
+        if sub["approved"] and sub["bonus_awarded"]:
+            conn.execute("UPDATE students SET bonus_points = MAX(0, bonus_points - ?) WHERE id = ?", 
+                         (sub["bonus_awarded"], sub["student_id"]))
+        
+        # Apply additional penalty
+        if penalty_points > 0:
+            conn.execute("UPDATE students SET bonus_points = MAX(0, bonus_points - ?) WHERE id = ?", 
+                         (penalty_points, sub["student_id"]))
+        
+        # Reset streak
+        conn.execute("UPDATE students SET solve_streak = 0 WHERE id = ?", (sub["student_id"],))
+        
+        return True
+
+
+def get_student_bonus(student_id: int) -> int:
+    """Get student's current bonus points"""
+    with get_db() as conn:
+        row = conn.execute("SELECT bonus_points FROM students WHERE id = ?", (student_id,)).fetchone()
+        return row["bonus_points"] if row else 0
+
+
 def gamble_points(student_id: int, amount: int) -> tuple[bool, int]:
     """50/50 gamble - double or lose. Returns (won, new_balance)"""
     import random
