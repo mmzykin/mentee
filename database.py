@@ -683,4 +683,536 @@ def get_cheaters_board() -> List[Dict]:
         return [dict(r) for r in rows]
 
 
+# === ANNOUNCEMENTS ===
+
+def init_announcements():
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS announcements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                created_by INTEGER NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS announcement_reads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                announcement_id INTEGER NOT NULL,
+                student_id INTEGER NOT NULL,
+                read_at TEXT NOT NULL,
+                UNIQUE(announcement_id, student_id)
+            )
+        """)
+
+
+def create_announcement(title: str, content: str, admin_id: int) -> int:
+    init_announcements()
+    with get_db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO announcements (title, content, created_at, created_by) VALUES (?, ?, ?, ?)",
+            (title, content, datetime.now().isoformat(), admin_id)
+        )
+        return cursor.lastrowid
+
+
+def get_announcements(limit: int = 20) -> List[Dict]:
+    init_announcements()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM announcements ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_announcement(announcement_id: int) -> Optional[Dict]:
+    init_announcements()
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM announcements WHERE id = ?", (announcement_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def mark_announcement_read(announcement_id: int, student_id: int):
+    init_announcements()
+    with get_db() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO announcement_reads (announcement_id, student_id, read_at) VALUES (?, ?, ?)",
+                (announcement_id, student_id, datetime.now().isoformat())
+            )
+        except sqlite3.IntegrityError:
+            pass
+
+
+def get_unread_announcements_count(student_id: int) -> int:
+    init_announcements()
+    with get_db() as conn:
+        count = conn.execute("""
+            SELECT COUNT(*) FROM announcements a
+            WHERE NOT EXISTS (
+                SELECT 1 FROM announcement_reads ar 
+                WHERE ar.announcement_id = a.id AND ar.student_id = ?
+            )
+        """, (student_id,)).fetchone()[0]
+        return count
+
+
+def delete_announcement(announcement_id: int) -> bool:
+    with get_db() as conn:
+        conn.execute("DELETE FROM announcement_reads WHERE announcement_id = ?", (announcement_id,))
+        result = conn.execute("DELETE FROM announcements WHERE id = ?", (announcement_id,))
+        return result.rowcount > 0
+
+
+# === MEETINGS/CALENDAR ===
+
+def init_meetings():
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meetings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER,
+                title TEXT NOT NULL,
+                meeting_link TEXT NOT NULL,
+                scheduled_at TEXT NOT NULL,
+                duration_minutes INTEGER DEFAULT 30,
+                status TEXT DEFAULT 'pending',
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                notes TEXT,
+                reminder_24h_sent INTEGER DEFAULT 0,
+                reminder_1h_sent INTEGER DEFAULT 0,
+                FOREIGN KEY (student_id) REFERENCES students(id)
+            )
+        """)
+
+
+def create_meeting(student_id: Optional[int], title: str, meeting_link: str, 
+                   scheduled_at: str, duration_minutes: int, admin_id: int, notes: str = None) -> int:
+    init_meetings()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO meetings (student_id, title, meeting_link, scheduled_at, 
+               duration_minutes, created_by, created_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (student_id, title, meeting_link, scheduled_at, duration_minutes, 
+             admin_id, datetime.now().isoformat(), notes)
+        )
+        return cursor.lastrowid
+
+
+def get_meetings(student_id: int = None, include_past: bool = False) -> List[Dict]:
+    init_meetings()
+    with get_db() as conn:
+        now = datetime.now().isoformat()
+        if student_id:
+            if include_past:
+                rows = conn.execute(
+                    "SELECT * FROM meetings WHERE student_id = ? ORDER BY scheduled_at DESC", 
+                    (student_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM meetings WHERE student_id = ? AND scheduled_at > ? ORDER BY scheduled_at ASC", 
+                    (student_id, now)
+                ).fetchall()
+        else:
+            if include_past:
+                rows = conn.execute("SELECT * FROM meetings ORDER BY scheduled_at DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM meetings WHERE scheduled_at > ? ORDER BY scheduled_at ASC", (now,)
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_meeting(meeting_id: int) -> Optional[Dict]:
+    init_meetings()
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_meeting_status(meeting_id: int, status: str) -> bool:
+    with get_db() as conn:
+        conn.execute("UPDATE meetings SET status = ? WHERE id = ?", (status, meeting_id))
+        return True
+
+
+def delete_meeting(meeting_id: int) -> bool:
+    with get_db() as conn:
+        result = conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
+        return result.rowcount > 0
+
+
+def get_pending_reminders() -> List[Dict]:
+    """Get meetings that need reminders sent"""
+    init_meetings()
+    with get_db() as conn:
+        now = datetime.now()
+        in_24h = (now + timedelta(hours=24)).isoformat()
+        in_1h = (now + timedelta(hours=1)).isoformat()
+        
+        # Get meetings needing 24h reminder (between now and 24h from now, not sent yet)
+        rows_24h = conn.execute("""
+            SELECT * FROM meetings 
+            WHERE reminder_24h_sent = 0 
+            AND scheduled_at <= ? 
+            AND scheduled_at > ?
+            AND status != 'cancelled'
+        """, (in_24h, now.isoformat())).fetchall()
+        
+        # Get meetings needing 1h reminder
+        rows_1h = conn.execute("""
+            SELECT * FROM meetings 
+            WHERE reminder_1h_sent = 0 
+            AND scheduled_at <= ? 
+            AND scheduled_at > ?
+            AND status != 'cancelled'
+        """, (in_1h, now.isoformat())).fetchall()
+        
+        result = []
+        for r in rows_24h:
+            d = dict(r)
+            d['reminder_type'] = '24h'
+            result.append(d)
+        for r in rows_1h:
+            d = dict(r)
+            d['reminder_type'] = '1h'
+            result.append(d)
+        return result
+
+
+def mark_reminder_sent(meeting_id: int, reminder_type: str):
+    with get_db() as conn:
+        if reminder_type == '24h':
+            conn.execute("UPDATE meetings SET reminder_24h_sent = 1 WHERE id = ?", (meeting_id,))
+        else:
+            conn.execute("UPDATE meetings SET reminder_1h_sent = 1 WHERE id = ?", (meeting_id,))
+
+
+# === INTERVIEW QUESTIONS ===
+
+def init_questions():
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS interview_questions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic_id TEXT,
+                question_text TEXT NOT NULL,
+                question_type TEXT DEFAULT 'choice',
+                correct_answer TEXT,
+                points REAL DEFAULT 0.1,
+                explanation TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (topic_id) REFERENCES topics(topic_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS question_options (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                question_id INTEGER NOT NULL,
+                option_text TEXT NOT NULL,
+                is_correct INTEGER DEFAULT 0,
+                option_order INTEGER DEFAULT 0,
+                FOREIGN KEY (question_id) REFERENCES interview_questions(id)
+            )
+        """)
+
+
+def add_question(topic_id: str, question_text: str, options: List[Dict], 
+                 correct_idx: int, points: float = 0.1, explanation: str = None) -> int:
+    """
+    Add a question with options.
+    options: [{"text": "Option A"}, {"text": "Option B"}, ...]
+    correct_idx: index of correct option (0-based)
+    """
+    init_questions()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO interview_questions 
+               (topic_id, question_text, points, explanation, created_at) 
+               VALUES (?, ?, ?, ?, ?)""",
+            (topic_id, question_text, points, explanation, datetime.now().isoformat())
+        )
+        question_id = cursor.lastrowid
+        
+        for i, opt in enumerate(options):
+            conn.execute(
+                """INSERT INTO question_options 
+                   (question_id, option_text, is_correct, option_order) 
+                   VALUES (?, ?, ?, ?)""",
+                (question_id, opt["text"], 1 if i == correct_idx else 0, i)
+            )
+        return question_id
+
+
+def get_questions_by_topic(topic_id: str) -> List[Dict]:
+    init_questions()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM interview_questions WHERE topic_id = ? ORDER BY id", (topic_id,)
+        ).fetchall()
+        result = []
+        for r in rows:
+            q = dict(r)
+            opts = conn.execute(
+                "SELECT * FROM question_options WHERE question_id = ? ORDER BY option_order",
+                (q['id'],)
+            ).fetchall()
+            q['options'] = [dict(o) for o in opts]
+            result.append(q)
+        return result
+
+
+def get_question(question_id: int) -> Optional[Dict]:
+    init_questions()
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM interview_questions WHERE id = ?", (question_id,)).fetchone()
+        if not row:
+            return None
+        q = dict(row)
+        opts = conn.execute(
+            "SELECT * FROM question_options WHERE question_id = ? ORDER BY option_order",
+            (question_id,)
+        ).fetchall()
+        q['options'] = [dict(o) for o in opts]
+        return q
+
+
+def get_random_questions(count: int = 20, topic_id: str = None) -> List[Dict]:
+    """Get random questions for a quiz"""
+    init_questions()
+    with get_db() as conn:
+        if topic_id:
+            rows = conn.execute(
+                "SELECT * FROM interview_questions WHERE topic_id = ? ORDER BY RANDOM() LIMIT ?",
+                (topic_id, count)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM interview_questions ORDER BY RANDOM() LIMIT ?", (count,)
+            ).fetchall()
+        
+        result = []
+        for r in rows:
+            q = dict(r)
+            opts = conn.execute(
+                "SELECT * FROM question_options WHERE question_id = ? ORDER BY option_order",
+                (q['id'],)
+            ).fetchall()
+            q['options'] = [dict(o) for o in opts]
+            result.append(q)
+        return result
+
+
+def delete_question(question_id: int) -> bool:
+    with get_db() as conn:
+        conn.execute("DELETE FROM question_options WHERE question_id = ?", (question_id,))
+        result = conn.execute("DELETE FROM interview_questions WHERE id = ?", (question_id,))
+        return result.rowcount > 0
+
+
+def get_all_questions_count() -> int:
+    init_questions()
+    with get_db() as conn:
+        return conn.execute("SELECT COUNT(*) FROM interview_questions").fetchone()[0]
+
+
+def get_questions_count_by_topic(topic_id: str) -> int:
+    init_questions()
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM interview_questions WHERE topic_id = ?", (topic_id,)
+        ).fetchone()[0]
+
+
+# === QUIZ/CONTEST SESSIONS ===
+
+def init_quizzes():
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS quiz_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                quiz_type TEXT DEFAULT 'random',
+                total_questions INTEGER NOT NULL,
+                correct_answers INTEGER DEFAULT 0,
+                points_earned REAL DEFAULT 0,
+                time_limit_seconds INTEGER,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT DEFAULT 'in_progress',
+                FOREIGN KEY (student_id) REFERENCES students(id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS quiz_answers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                question_id INTEGER NOT NULL,
+                selected_option_id INTEGER,
+                is_correct INTEGER DEFAULT 0,
+                answered_at TEXT,
+                FOREIGN KEY (session_id) REFERENCES quiz_sessions(id),
+                FOREIGN KEY (question_id) REFERENCES interview_questions(id)
+            )
+        """)
+
+
+def start_quiz_session(student_id: int, questions: List[Dict], 
+                       time_limit_seconds: int = 600, quiz_type: str = 'random') -> int:
+    """Start a new quiz session"""
+    init_quizzes()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO quiz_sessions 
+               (student_id, quiz_type, total_questions, time_limit_seconds, started_at) 
+               VALUES (?, ?, ?, ?, ?)""",
+            (student_id, quiz_type, len(questions), time_limit_seconds, datetime.now().isoformat())
+        )
+        session_id = cursor.lastrowid
+        
+        # Pre-create answer slots for all questions
+        for q in questions:
+            conn.execute(
+                "INSERT INTO quiz_answers (session_id, question_id) VALUES (?, ?)",
+                (session_id, q['id'])
+            )
+        return session_id
+
+
+def get_quiz_session(session_id: int) -> Optional[Dict]:
+    init_quizzes()
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM quiz_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            return None
+        session = dict(row)
+        
+        # Get all answers with question details
+        answers = conn.execute("""
+            SELECT qa.*, iq.question_text, iq.points
+            FROM quiz_answers qa
+            JOIN interview_questions iq ON qa.question_id = iq.id
+            WHERE qa.session_id = ?
+            ORDER BY qa.id
+        """, (session_id,)).fetchall()
+        session['answers'] = [dict(a) for a in answers]
+        return session
+
+
+def get_quiz_current_question(session_id: int) -> Optional[Dict]:
+    """Get next unanswered question in quiz"""
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT qa.*, iq.question_text, iq.points, iq.explanation
+            FROM quiz_answers qa
+            JOIN interview_questions iq ON qa.question_id = iq.id
+            WHERE qa.session_id = ? AND qa.selected_option_id IS NULL
+            ORDER BY qa.id
+            LIMIT 1
+        """, (session_id,)).fetchone()
+        
+        if not row:
+            return None
+        
+        q = dict(row)
+        opts = conn.execute(
+            "SELECT * FROM question_options WHERE question_id = ? ORDER BY option_order",
+            (q['question_id'],)
+        ).fetchall()
+        q['options'] = [dict(o) for o in opts]
+        return q
+
+
+def answer_quiz_question(session_id: int, question_id: int, option_id: int) -> Dict:
+    """Submit answer for a quiz question"""
+    with get_db() as conn:
+        # Check if option is correct
+        opt = conn.execute(
+            "SELECT is_correct FROM question_options WHERE id = ?", (option_id,)
+        ).fetchone()
+        is_correct = opt['is_correct'] if opt else 0
+        
+        # Update answer
+        conn.execute("""
+            UPDATE quiz_answers 
+            SET selected_option_id = ?, is_correct = ?, answered_at = ?
+            WHERE session_id = ? AND question_id = ?
+        """, (option_id, is_correct, datetime.now().isoformat(), session_id, question_id))
+        
+        # Get question points
+        q = conn.execute(
+            "SELECT points FROM interview_questions WHERE id = ?", (question_id,)
+        ).fetchone()
+        points = q['points'] if q and is_correct else 0
+        
+        # Update session stats
+        if is_correct:
+            conn.execute("""
+                UPDATE quiz_sessions 
+                SET correct_answers = correct_answers + 1, points_earned = points_earned + ?
+                WHERE id = ?
+            """, (points, session_id))
+        
+        return {'is_correct': bool(is_correct), 'points': points}
+
+
+def finish_quiz_session(session_id: int) -> Dict:
+    """Finish quiz and award points"""
+    with get_db() as conn:
+        conn.execute("""
+            UPDATE quiz_sessions SET status = 'finished', finished_at = ? WHERE id = ?
+        """, (datetime.now().isoformat(), session_id))
+        
+        session = conn.execute("SELECT * FROM quiz_sessions WHERE id = ?", (session_id,)).fetchone()
+        if session:
+            # Award bonus points (rounded)
+            points = int(session['points_earned'])
+            if points > 0:
+                conn.execute(
+                    "UPDATE students SET bonus_points = bonus_points + ? WHERE id = ?",
+                    (points, session['student_id'])
+                )
+        return dict(session) if session else {}
+
+
+def get_student_quiz_history(student_id: int, limit: int = 10) -> List[Dict]:
+    init_quizzes()
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM quiz_sessions 
+            WHERE student_id = ? 
+            ORDER BY started_at DESC 
+            LIMIT ?
+        """, (student_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def is_quiz_expired(session_id: int) -> bool:
+    """Check if quiz time limit has passed"""
+    with get_db() as conn:
+        session = conn.execute("SELECT * FROM quiz_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session or session['status'] != 'in_progress':
+            return True
+        
+        started = datetime.fromisoformat(session['started_at'])
+        limit = session['time_limit_seconds'] or 600
+        return datetime.now() > started + timedelta(seconds=limit)
+
+
+def get_quiz_time_remaining(session_id: int) -> int:
+    """Get remaining seconds for quiz"""
+    with get_db() as conn:
+        session = conn.execute("SELECT * FROM quiz_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session:
+            return 0
+        
+        started = datetime.fromisoformat(session['started_at'])
+        limit = session['time_limit_seconds'] or 600
+        elapsed = (datetime.now() - started).total_seconds()
+        return max(0, int(limit - elapsed))
+
+
 init_db()

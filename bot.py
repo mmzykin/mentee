@@ -3,7 +3,8 @@ import sys
 import re
 import tempfile
 import subprocess
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -24,7 +25,7 @@ ADMIN_USERNAMES = ["qwerty1492", "redd_dd"]
 BONUS_POINTS_PER_APPROVAL = 1
 
 
-def main_menu_keyboard(is_admin=False, has_assigned=False, can_spin=False):
+def main_menu_keyboard(is_admin=False, has_assigned=False, can_spin=False, unread_announcements=0):
     keyboard = [
         [InlineKeyboardButton("📚 Задания", callback_data="modules:list")],
         [InlineKeyboardButton("🏆 Лидерборд", callback_data="menu:leaderboard")],
@@ -32,6 +33,19 @@ def main_menu_keyboard(is_admin=False, has_assigned=False, can_spin=False):
     ]
     if has_assigned:
         keyboard.insert(1, [InlineKeyboardButton("📌 Назначенные мне", callback_data="myassigned:0")])
+    
+    # Announcements with unread badge
+    ann_text = "📢 Объявления"
+    if unread_announcements > 0:
+        ann_text += f" ({unread_announcements} 🔴)"
+    keyboard.append([InlineKeyboardButton(ann_text, callback_data="announcements:list")])
+    
+    # Meetings
+    keyboard.append([InlineKeyboardButton("📅 Мои встречи", callback_data="meetings:my")])
+    
+    # Quiz
+    keyboard.append([InlineKeyboardButton("❓ Вопросы с собесов", callback_data="quiz:menu")])
+    
     if can_spin:
         keyboard.append([InlineKeyboardButton("🎰 Ежедневная рулетка", callback_data="dailyspin")])
     if is_admin:
@@ -52,6 +66,13 @@ def admin_menu_keyboard():
         [
             InlineKeyboardButton("🎫 Коды", callback_data="admin:codes"),
             InlineKeyboardButton("🧹 Очистка", callback_data="admin:cleanup"),
+        ],
+        [
+            InlineKeyboardButton("📢 Объявления", callback_data="admin:announcements"),
+            InlineKeyboardButton("📅 Встречи", callback_data="admin:meetings"),
+        ],
+        [
+            InlineKeyboardButton("❓ Вопросы", callback_data="admin:questions"),
         ],
         [InlineKeyboardButton("« Главное меню", callback_data="menu:main")],
     ])
@@ -135,9 +156,43 @@ def run_go_code_with_tests(code: str, test_code: str) -> tuple[bool, str]:
     test_path = os.path.join(temp_dir, "main_test.go")
     
     try:
+        # Ensure user code has package main
+        if "package main" not in code:
+            code = "package main\n\n" + code
+        
         # Write main code
         with open(main_path, "w", encoding="utf-8") as f:
             f.write(code)
+        
+        # Ensure test code has proper package and imports
+        if "package main" not in test_code:
+            # Detect needed imports from test code
+            imports = ["testing"]
+            if "time." in test_code:
+                imports.append("time")
+            if "math." in test_code:
+                imports.append("math")
+            if "fmt." in test_code:
+                imports.append("fmt")
+            if "strings." in test_code:
+                imports.append("strings")
+            if "sync." in test_code:
+                imports.append("sync")
+            if "sync/atomic" in test_code or "atomic." in test_code:
+                imports.append("sync/atomic")
+            if "context." in test_code:
+                imports.append("context")
+            if "errors." in test_code:
+                imports.append("errors")
+            if "sort." in test_code:
+                imports.append("sort")
+            if "bytes." in test_code:
+                imports.append("bytes")
+            if "cmp." in test_code:
+                imports.append("cmp")
+            
+            import_str = "\n".join(f'\t"{imp}"' for imp in imports)
+            test_code = f"package main\n\nimport (\n{import_str}\n)\n\n{test_code}"
         
         # Write test code
         with open(test_path, "w", encoding="utf-8") as f:
@@ -273,12 +328,13 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "main":
         has_assigned = False
         can_spin = False
-        if not is_admin:
-            student = db.get_student(user.id)
-            if student:
-                has_assigned = len(db.get_assigned_tasks(student["id"])) > 0
-                can_spin = db.can_spin_daily(student["id"])
-        await query.edit_message_text("🏠 <b>Главное меню</b>", reply_markup=main_menu_keyboard(is_admin, has_assigned, can_spin), parse_mode="HTML")
+        unread_ann = 0
+        student = db.get_student(user.id)
+        if student:
+            has_assigned = len(db.get_assigned_tasks(student["id"])) > 0
+            can_spin = db.can_spin_daily(student["id"])
+            unread_ann = db.get_unread_announcements_count(student["id"])
+        await query.edit_message_text("🏠 <b>Главное меню</b>", reply_markup=main_menu_keyboard(is_admin, has_assigned, can_spin, unread_ann), parse_mode="HTML")
     elif action == "mystats":
         student = db.get_student(user.id)
         if not student:
@@ -787,6 +843,58 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "cleanup":
         deleted = db.cleanup_old_code()
         await query.edit_message_text(f"🧹 Удалено кода из <b>{deleted}</b> отправок.", reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+    
+    elif action == "announcements":
+        announcements = db.get_announcements(10)
+        text = "📢 <b>Объявления</b>\n\n"
+        if announcements:
+            for a in announcements:
+                date = a['created_at'][:10]
+                text += f"• [{date}] <b>{escape_html(a['title'])}</b>\n"
+        else:
+            text += "<i>Пока нет объявлений</i>\n"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Новое объявление", callback_data="create:announcement")],
+            [InlineKeyboardButton("« Админ", callback_data="menu:admin")]
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    
+    elif action == "meetings":
+        meetings = db.get_meetings(include_past=False)
+        text = "📅 <b>Запланированные встречи</b>\n\n"
+        if meetings:
+            for m in meetings:
+                student = db.get_student_by_id(m['student_id']) if m['student_id'] else None
+                student_name = (student.get('first_name') or student.get('username') or '?') if student else 'Не назначен'
+                dt = m['scheduled_at'][:16].replace('T', ' ')
+                status_emoji = {'pending': '⏳', 'confirmed': '✅', 'cancelled': '❌'}.get(m['status'], '⏳')
+                text += f"{status_emoji} <b>{escape_html(m['title'])}</b>\n"
+                text += f"   👤 {student_name} | 🕐 {dt}\n\n"
+        else:
+            text += "<i>Нет запланированных встреч</i>\n"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Назначить встречу", callback_data="create:meeting")],
+            [InlineKeyboardButton("📋 Все встречи", callback_data="meetings:all")],
+            [InlineKeyboardButton("« Админ", callback_data="menu:admin")]
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    
+    elif action == "questions":
+        total = db.get_all_questions_count()
+        text = f"❓ <b>Вопросы с собеседований</b>\n\nВсего: <b>{total}</b> вопросов\n\n"
+        topics = db.get_topics()
+        if topics:
+            text += "<b>По темам:</b>\n"
+            for t in topics[:15]:
+                count = db.get_questions_count_by_topic(t['topic_id'])
+                if count > 0:
+                    text += f"• {escape_html(t['name'])}: {count}\n"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Добавить вопрос", callback_data="create:question")],
+            [InlineKeyboardButton("📥 Импорт вопросов", callback_data="create:questions_bulk")],
+            [InlineKeyboardButton("« Админ", callback_data="menu:admin")]
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -840,6 +948,116 @@ async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"• <code>{t['topic_id']}</code>: {escape_html(t['name'])}\n"
         text += "\nОтправь в формате:\n<code>TOPIC: topic_id\nTASK_ID: task_id\nTITLE: Название\n---DESCRIPTION---\nОписание\n---TESTS---\ndef test(): ...</code>"
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:tasks")]])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    
+    elif action == "announcement":
+        context.user_data["creating"] = "announcement"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:announcements")]])
+        await query.edit_message_text(
+            "📢 <b>Новое объявление</b>\n\n"
+            "Отправь в формате:\n"
+            "<code>Заголовок\n---\nТекст объявления</code>\n\n"
+            "Первая строка — заголовок, после --- идёт текст.",
+            reply_markup=keyboard, parse_mode="HTML"
+        )
+    
+    elif action == "meeting":
+        students = db.get_active_students()
+        if not students:
+            await query.edit_message_text("Нет активных студентов.", reply_markup=back_to_admin_keyboard())
+            return
+        keyboard = [[InlineKeyboardButton(
+            f"👤 {s.get('first_name') or s.get('username') or '?'}", 
+            callback_data=f"create:meeting_student:{s['id']}"
+        )] for s in students]
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="admin:meetings")])
+        await query.edit_message_text(
+            "📅 <b>Новая встреча</b>\n\nВыбери студента:",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
+        )
+    
+    elif action == "meeting_student":
+        student_id = int(parts[2])
+        student = db.get_student_by_id(student_id)
+        if not student:
+            await query.edit_message_text("Студент не найден.", reply_markup=back_to_admin_keyboard())
+            return
+        context.user_data["creating"] = "meeting"
+        context.user_data["meeting_student_id"] = student_id
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:meetings")]])
+        name = student.get('first_name') or student.get('username') or '?'
+        await query.edit_message_text(
+            f"📅 <b>Встреча с {escape_html(name)}</b>\n\n"
+            "Отправь данные в формате:\n"
+            "<code>Пробное собеседование\n"
+            "https://telemost.yandex.ru/j/xxx\n"
+            "2026-01-15 18:00\n"
+            "30</code>\n\n"
+            "Строки:\n"
+            "1. Название встречи\n"
+            "2. Ссылка на Яндекс.Телемост\n"
+            "3. Дата и время (YYYY-MM-DD HH:MM)\n"
+            "4. Длительность в минутах",
+            reply_markup=keyboard, parse_mode="HTML"
+        )
+    
+    elif action == "question":
+        topics = db.get_topics()
+        if not topics:
+            await query.edit_message_text("Сначала создай тему.", reply_markup=back_to_admin_keyboard())
+            return
+        keyboard = [[InlineKeyboardButton(
+            f"📚 {t['name']}", callback_data=f"create:question_topic:{t['topic_id']}"
+        )] for t in topics[:20]]
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="admin:questions")])
+        await query.edit_message_text(
+            "❓ <b>Новый вопрос</b>\n\nВыбери тему:",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
+        )
+    
+    elif action == "question_topic":
+        topic_id = parts[2]
+        topic = db.get_topic(topic_id)
+        if not topic:
+            await query.edit_message_text("Тема не найдена.", reply_markup=back_to_admin_keyboard())
+            return
+        context.user_data["creating"] = "question"
+        context.user_data["question_topic_id"] = topic_id
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:questions")]])
+        await query.edit_message_text(
+            f"❓ <b>Вопрос в тему: {escape_html(topic['name'])}</b>\n\n"
+            "Отправь в формате:\n"
+            "<code>Текст вопроса?\n"
+            "---\n"
+            "A) Вариант 1\n"
+            "B) Вариант 2\n"
+            "C) Вариант 3\n"
+            "D) Вариант 4\n"
+            "---\n"
+            "B\n"
+            "---\n"
+            "Объяснение (необязательно)</code>\n\n"
+            "Правильный ответ — буква (A/B/C/D).",
+            reply_markup=keyboard, parse_mode="HTML"
+        )
+    
+    elif action == "questions_bulk":
+        context.user_data["creating"] = "questions_bulk"
+        topics = db.get_topics()
+        text = "📥 <b>Импорт вопросов</b>\n\nТемы:\n"
+        for t in topics[:15]:
+            text += f"• <code>{t['topic_id']}</code>: {escape_html(t['name'])}\n"
+        text += "\nОтправь вопросы в формате:\n"
+        text += "<code>TOPIC: topic_id\n\n"
+        text += "Q: Текст вопроса?\n"
+        text += "A) Вариант 1\n"
+        text += "B) Вариант 2\n"
+        text += "C) Правильный вариант\n"
+        text += "D) Вариант 4\n"
+        text += "ANSWER: C\n"
+        text += "EXPLAIN: Объяснение\n\n"
+        text += "Q: Следующий вопрос?...</code>"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:questions")]])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
@@ -1564,7 +1782,376 @@ async def restore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("✅ Студент восстановлен и снова активен.", reply_markup=back_to_admin_keyboard())
 
 
+# === ANNOUNCEMENTS ===
+
+async def announcements_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await safe_answer(query)
+    user = update.effective_user
+    student = db.get_student(user.id)
+    
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else "list"
+    
+    if action == "list":
+        announcements = db.get_announcements(10)
+        text = "📢 <b>Объявления</b>\n\n"
+        if announcements:
+            for a in announcements:
+                date = a['created_at'][:10]
+                text += f"• [{date}] <b>{escape_html(a['title'])}</b>\n"
+                if len(a['content']) > 100:
+                    text += f"  {escape_html(a['content'][:100])}...\n"
+                else:
+                    text += f"  {escape_html(a['content'])}\n"
+                text += "\n"
+                # Mark as read
+                if student:
+                    db.mark_announcement_read(a['id'], student['id'])
+        else:
+            text += "<i>Пока нет объявлений</i>\n"
+        
+        await query.edit_message_text(text, reply_markup=back_to_menu_keyboard(), parse_mode="HTML")
+
+
+# === MEETINGS ===
+
+async def meetings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await safe_answer(query)
+    user = update.effective_user
+    student = db.get_student(user.id)
+    is_admin = db.is_admin(user.id)
+    
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else "my"
+    
+    if action == "my":
+        if not student:
+            await query.edit_message_text("⛔ Нужна регистрация", reply_markup=back_to_menu_keyboard())
+            return
+        
+        meetings = db.get_meetings(student_id=student['id'], include_past=False)
+        text = "📅 <b>Мои встречи</b>\n\n"
+        
+        if meetings:
+            for m in meetings:
+                dt = m['scheduled_at'][:16].replace('T', ' ')
+                status_emoji = {'pending': '⏳', 'confirmed': '✅', 'cancelled': '❌', 'requested': '🔔'}.get(m['status'], '⏳')
+                text += f"{status_emoji} <b>{escape_html(m['title'])}</b>\n"
+                text += f"   🕐 {dt} ({m['duration_minutes']} мин)\n"
+                if m['meeting_link']:
+                    text += f"   🔗 <a href='{m['meeting_link']}'>Открыть Телемост</a>\n"
+                text += "\n"
+        else:
+            text += "<i>Нет запланированных встреч</i>\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Запросить встречу", callback_data="meetings:request")],
+            [InlineKeyboardButton("« Главное меню", callback_data="menu:main")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML", disable_web_page_preview=True)
+    
+    elif action == "request":
+        if not student:
+            await query.edit_message_text("⛔ Нужна регистрация", reply_markup=back_to_menu_keyboard())
+            return
+        context.user_data["creating"] = "meeting_request"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="meetings:my")]])
+        await query.edit_message_text(
+            "📅 <b>Запрос встречи с ментором</b>\n\n"
+            "Отправь в формате:\n"
+            "<code>Тема встречи\n"
+            "2026-01-20 18:00\n"
+            "30</code>\n\n"
+            "Строки:\n"
+            "1. Тема/цель встречи\n"
+            "2. Желаемая дата и время (YYYY-MM-DD HH:MM)\n"
+            "3. Длительность в минутах",
+            reply_markup=keyboard, parse_mode="HTML"
+        )
+    
+    elif action == "all" and is_admin:
+        meetings = db.get_meetings(include_past=True)
+        text = "📅 <b>Все встречи</b>\n\n"
+        
+        if meetings:
+            for m in meetings[:15]:
+                student_obj = db.get_student_by_id(m['student_id']) if m['student_id'] else None
+                student_name = (student_obj.get('first_name') or student_obj.get('username') or '?') if student_obj else '—'
+                dt = m['scheduled_at'][:16].replace('T', ' ')
+                status_emoji = {'pending': '⏳', 'confirmed': '✅', 'cancelled': '❌'}.get(m['status'], '⏳')
+                text += f"{status_emoji} <b>{escape_html(m['title'])}</b>\n"
+                text += f"   👤 {student_name} | 🕐 {dt}\n\n"
+        else:
+            text += "<i>Нет встреч</i>\n"
+        
+        keyboard = [[InlineKeyboardButton("« Админ", callback_data="admin:meetings")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def meeting_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await safe_answer(query)
+    user = update.effective_user
+    student = db.get_student(user.id)
+    
+    parts = query.data.split(":")
+    action = parts[0]  # meeting_confirm or meeting_decline
+    meeting_id = int(parts[1])
+    
+    meeting = db.get_meeting(meeting_id)
+    if not meeting:
+        await query.edit_message_text("Встреча не найдена.")
+        return
+    
+    if action == "meeting_confirm":
+        db.update_meeting_status(meeting_id, "confirmed")
+        await query.edit_message_text(
+            f"✅ <b>Встреча подтверждена!</b>\n\n"
+            f"<b>{escape_html(meeting['title'])}</b>\n"
+            f"🕐 {meeting['scheduled_at'][:16].replace('T', ' ')}\n"
+            f"🔗 <a href='{meeting['meeting_link']}'>Открыть Телемост</a>\n\n"
+            f"Напоминание придёт за 24 часа и за 1 час до встречи.",
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+    elif action == "meeting_decline":
+        db.update_meeting_status(meeting_id, "cancelled")
+        await query.edit_message_text(
+            f"❌ <b>Встреча отклонена</b>\n\n"
+            f"Свяжитесь с ментором для выбора другого времени.",
+            parse_mode="HTML"
+        )
+    elif action == "meeting_approve":
+        # Admin approving a student's meeting request
+        if not db.is_admin(user.id):
+            await query.edit_message_text("⛔ Только для админов")
+            return
+        
+        context.user_data["creating"] = "meeting_approve"
+        context.user_data["approve_meeting_id"] = meeting_id
+        
+        student_obj = db.get_student_by_id(meeting['student_id']) if meeting['student_id'] else None
+        student_name = (student_obj.get('first_name') or student_obj.get('username') or '?') if student_obj else '—'
+        dt = meeting['scheduled_at'][:16].replace('T', ' ')
+        
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:meetings")]])
+        await query.edit_message_text(
+            f"✅ <b>Подтверждение встречи</b>\n\n"
+            f"👤 {student_name}\n"
+            f"📋 {escape_html(meeting['title'])}\n"
+            f"🕐 {dt}\n"
+            f"⏱ {meeting['duration_minutes']} мин\n\n"
+            f"<b>Отправь ссылку на Яндекс.Телемост:</b>",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    elif action == "meeting_reject":
+        # Admin rejecting a student's meeting request
+        if not db.is_admin(user.id):
+            await query.edit_message_text("⛔ Только для админов")
+            return
+        
+        db.update_meeting_status(meeting_id, "cancelled")
+        
+        # Notify student
+        if meeting['student_id']:
+            student_obj = db.get_student_by_id(meeting['student_id'])
+            if student_obj:
+                try:
+                    await context.bot.send_message(
+                        student_obj['user_id'],
+                        f"❌ <b>Запрос на встречу отклонён</b>\n\n"
+                        f"📋 {escape_html(meeting['title'])}\n\n"
+                        f"Попробуй выбрать другое время.",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+        
+        await query.edit_message_text(
+            f"❌ Запрос отклонён.\n\nСтудент уведомлён.",
+            reply_markup=back_to_admin_keyboard()
+        )
+
+
+# === QUIZ ===
+
+async def quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await safe_answer(query)
+    user = update.effective_user
+    student = db.get_student(user.id)
+    
+    if not student:
+        await query.edit_message_text("⛔ Нужна регистрация", reply_markup=back_to_menu_keyboard())
+        return
+    
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else "menu"
+    
+    if action == "menu":
+        total_questions = db.get_all_questions_count()
+        history = db.get_student_quiz_history(student['id'], 5)
+        
+        text = "❓ <b>Вопросы с собеседований</b>\n\n"
+        text += f"Всего вопросов: <b>{total_questions}</b>\n\n"
+        
+        if history:
+            text += "<b>Последние попытки:</b>\n"
+            for h in history:
+                date = h['started_at'][:10]
+                score = f"{h['correct_answers']}/{h['total_questions']}"
+                points = f"+{h['points_earned']:.1f}"
+                status = "✅" if h['status'] == 'finished' else "⏳"
+                text += f"{status} [{date}] {score} ({points})\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("🎲 Рандом 20 вопросов", callback_data="quiz:start_random")],
+            [InlineKeyboardButton("📚 По теме", callback_data="quiz:select_topic")],
+            [InlineKeyboardButton("« Главное меню", callback_data="menu:main")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    
+    elif action == "select_topic":
+        topics = db.get_topics()
+        keyboard = []
+        for t in topics:
+            count = db.get_questions_count_by_topic(t['topic_id'])
+            if count > 0:
+                keyboard.append([InlineKeyboardButton(
+                    f"📚 {t['name']} ({count})", 
+                    callback_data=f"quiz:start_topic:{t['topic_id']}"
+                )])
+        keyboard.append([InlineKeyboardButton("« Назад", callback_data="quiz:menu")])
+        await query.edit_message_text("Выбери тему:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    
+    elif action == "start_random":
+        questions = db.get_random_questions(20)
+        if len(questions) < 5:
+            await query.edit_message_text("Недостаточно вопросов. Минимум 5.", reply_markup=back_to_menu_keyboard())
+            return
+        
+        session_id = db.start_quiz_session(student['id'], questions, time_limit_seconds=600)
+        context.user_data['quiz_session'] = session_id
+        await show_quiz_question(query, context, session_id)
+    
+    elif action == "start_topic":
+        topic_id = parts[2]
+        questions = db.get_random_questions(20, topic_id=topic_id)
+        if len(questions) < 3:
+            await query.edit_message_text("Недостаточно вопросов в этой теме.", reply_markup=back_to_menu_keyboard())
+            return
+        
+        session_id = db.start_quiz_session(student['id'], questions, time_limit_seconds=600)
+        context.user_data['quiz_session'] = session_id
+        await show_quiz_question(query, context, session_id)
+    
+    elif action == "answer":
+        session_id = context.user_data.get('quiz_session')
+        if not session_id:
+            await query.edit_message_text("Сессия не найдена.", reply_markup=back_to_menu_keyboard())
+            return
+        
+        # Check if expired
+        if db.is_quiz_expired(session_id):
+            result = db.finish_quiz_session(session_id)
+            context.user_data.pop('quiz_session', None)
+            await show_quiz_results(query, result)
+            return
+        
+        question_id = int(parts[2])
+        option_id = int(parts[3])
+        
+        answer_result = db.answer_quiz_question(session_id, question_id, option_id)
+        
+        # Show brief feedback and next question
+        await show_quiz_question(query, context, session_id, last_correct=answer_result['is_correct'])
+    
+    elif action == "finish":
+        session_id = context.user_data.get('quiz_session')
+        if session_id:
+            result = db.finish_quiz_session(session_id)
+            context.user_data.pop('quiz_session', None)
+            await show_quiz_results(query, result)
+
+
+async def show_quiz_question(query, context, session_id, last_correct=None):
+    """Show current quiz question"""
+    q = db.get_quiz_current_question(session_id)
+    
+    if not q:
+        # No more questions - finish quiz
+        result = db.finish_quiz_session(session_id)
+        context.user_data.pop('quiz_session', None)
+        await show_quiz_results(query, result)
+        return
+    
+    session = db.get_quiz_session(session_id)
+    remaining = db.get_quiz_time_remaining(session_id)
+    mins, secs = divmod(remaining, 60)
+    
+    answered = sum(1 for a in session['answers'] if a.get('selected_option_id'))
+    total = session['total_questions']
+    
+    text = f"❓ <b>Вопрос {answered + 1}/{total}</b>\n"
+    text += f"⏱ Осталось: {mins}:{secs:02d}\n\n"
+    
+    if last_correct is not None:
+        text += "✅ Верно!\n\n" if last_correct else "❌ Неверно\n\n"
+    
+    text += f"<b>{escape_html(q['question_text'])}</b>\n\n"
+    
+    letters = ['A', 'B', 'C', 'D', 'E']
+    keyboard = []
+    for i, opt in enumerate(q['options']):
+        letter = letters[i] if i < len(letters) else str(i+1)
+        keyboard.append([InlineKeyboardButton(
+            f"{letter}) {opt['option_text'][:50]}",
+            callback_data=f"quiz:answer:{q['question_id']}:{opt['id']}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton("⏹ Завершить досрочно", callback_data="quiz:finish")])
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def show_quiz_results(query, result):
+    """Show quiz results"""
+    if not result:
+        await query.edit_message_text("Ошибка получения результатов.", reply_markup=back_to_menu_keyboard())
+        return
+    
+    correct = result.get('correct_answers', 0)
+    total = result.get('total_questions', 0)
+    points = result.get('points_earned', 0)
+    percent = (correct / total * 100) if total > 0 else 0
+    
+    if percent >= 80:
+        grade = "🏆 Отлично!"
+    elif percent >= 60:
+        grade = "👍 Хорошо"
+    elif percent >= 40:
+        grade = "📚 Неплохо, но повтори материал"
+    else:
+        grade = "📖 Нужно больше практики"
+    
+    text = f"🎯 <b>Результаты квиза</b>\n\n"
+    text += f"Правильных: <b>{correct}/{total}</b> ({percent:.0f}%)\n"
+    text += f"Заработано: <b>+{int(points)}</b> баллов\n\n"
+    text += f"{grade}"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Ещё раз", callback_data="quiz:menu")],
+        [InlineKeyboardButton("« Главное меню", callback_data="menu:main")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
     user = update.effective_user
     text = update.message.text.strip()
     
@@ -1622,6 +2209,227 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ ID занят.")
             return
         
+        if context.user_data.get("creating") == "announcement":
+            if "---" not in text:
+                await update.message.reply_text("❌ Нужен разделитель --- между заголовком и текстом")
+                return
+            parts = text.split("---", 1)
+            title = parts[0].strip()
+            content = parts[1].strip() if len(parts) > 1 else ""
+            if not title:
+                await update.message.reply_text("❌ Заголовок не может быть пустым")
+                return
+            ann_id = db.create_announcement(title, content, user.id)
+            del context.user_data["creating"]
+            
+            # Send to all students
+            students = db.get_active_students()
+            sent_count = 0
+            for s in students:
+                try:
+                    await context.bot.send_message(
+                        s["user_id"],
+                        f"📢 <b>Новое объявление!</b>\n\n"
+                        f"<b>{escape_html(title)}</b>\n\n"
+                        f"{escape_html(content)}",
+                        parse_mode="HTML"
+                    )
+                    sent_count += 1
+                except Exception:
+                    pass
+            await update.message.reply_text(
+                f"✅ Объявление создано и отправлено {sent_count} студентам!",
+                reply_markup=back_to_admin_keyboard()
+            )
+            return
+        
+        if context.user_data.get("creating") == "meeting":
+            lines = text.strip().split("\n")
+            if len(lines) < 4:
+                await update.message.reply_text("❌ Нужно 4 строки: название, ссылка, дата, длительность")
+                return
+            title = lines[0].strip()
+            link = lines[1].strip()
+            try:
+                scheduled_at = datetime.strptime(lines[2].strip(), "%Y-%m-%d %H:%M").isoformat()
+            except ValueError:
+                await update.message.reply_text("❌ Неверный формат даты. Нужно: YYYY-MM-DD HH:MM")
+                return
+            try:
+                duration = int(lines[3].strip())
+            except ValueError:
+                duration = 30
+            
+            student_id = context.user_data.get("meeting_student_id")
+            meeting_id = db.create_meeting(student_id, title, link, scheduled_at, duration, user.id)
+            del context.user_data["creating"]
+            context.user_data.pop("meeting_student_id", None)
+            
+            # Notify student
+            if student_id:
+                student = db.get_student_by_id(student_id)
+                if student:
+                    dt_str = lines[2].strip()
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"meeting_confirm:{meeting_id}")],
+                        [InlineKeyboardButton("❌ Отклонить", callback_data=f"meeting_decline:{meeting_id}")]
+                    ])
+                    try:
+                        await context.bot.send_message(
+                            student["user_id"],
+                            f"📅 <b>Назначена встреча!</b>\n\n"
+                            f"<b>{escape_html(title)}</b>\n"
+                            f"🕐 {dt_str}\n"
+                            f"⏱ {duration} мин\n\n"
+                            f"🔗 <a href='{link}'>Открыть в Телемосте</a>",
+                            parse_mode="HTML",
+                            reply_markup=keyboard
+                        )
+                    except Exception:
+                        pass
+            
+            await update.message.reply_text(
+                f"✅ Встреча создана!\n\n"
+                f"📅 {title}\n🕐 {lines[2].strip()}\n⏱ {duration} мин",
+                reply_markup=back_to_admin_keyboard()
+            )
+            return
+        
+        if context.user_data.get("creating") == "meeting_approve":
+            # Admin is approving a meeting request with telemost link
+            meeting_id = context.user_data.get("approve_meeting_id")
+            if not meeting_id:
+                await update.message.reply_text("❌ Встреча не найдена")
+                return
+            
+            link = text.strip()
+            if not link.startswith("http"):
+                await update.message.reply_text("❌ Отправь ссылку на Яндекс.Телемост")
+                return
+            
+            meeting = db.get_meeting(meeting_id)
+            if meeting:
+                with db.get_db() as conn:
+                    conn.execute("UPDATE meetings SET meeting_link = ?, status = 'confirmed' WHERE id = ?", 
+                                (link, meeting_id))
+                
+                # Notify student
+                if meeting['student_id']:
+                    student = db.get_student_by_id(meeting['student_id'])
+                    if student:
+                        dt = meeting['scheduled_at'][:16].replace('T', ' ')
+                        try:
+                            await context.bot.send_message(
+                                student['user_id'],
+                                f"✅ <b>Встреча подтверждена!</b>\n\n"
+                                f"<b>{escape_html(meeting['title'])}</b>\n"
+                                f"🕐 {dt}\n"
+                                f"⏱ {meeting['duration_minutes']} мин\n\n"
+                                f"🔗 <a href='{link}'>Открыть в Телемосте</a>\n\n"
+                                f"Напоминание придёт за 24 часа и за 1 час.",
+                                parse_mode="HTML",
+                                disable_web_page_preview=True
+                            )
+                        except Exception:
+                            pass
+            
+            del context.user_data["creating"]
+            context.user_data.pop("approve_meeting_id", None)
+            await update.message.reply_text("✅ Встреча подтверждена, ссылка отправлена студенту!", 
+                                           reply_markup=back_to_admin_keyboard())
+            return
+        
+        if context.user_data.get("creating") == "question":
+            topic_id = context.user_data.get("question_topic_id")
+            if not topic_id:
+                await update.message.reply_text("❌ Тема не выбрана")
+                return
+            
+            parts = text.split("---")
+            if len(parts) < 3:
+                await update.message.reply_text("❌ Нужно разделить --- текст вопроса, варианты и ответ")
+                return
+            
+            question_text = parts[0].strip()
+            options_text = parts[1].strip()
+            answer_letter = parts[2].strip().upper()
+            explanation = parts[3].strip() if len(parts) > 3 else None
+            
+            # Parse options
+            options = []
+            for line in options_text.split("\n"):
+                line = line.strip()
+                if line and len(line) > 2 and line[1] == ')':
+                    options.append({"text": line[2:].strip()})
+            
+            if len(options) < 2:
+                await update.message.reply_text("❌ Нужно минимум 2 варианта ответа")
+                return
+            
+            # Find correct answer index
+            letter_to_idx = {'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4}
+            correct_idx = letter_to_idx.get(answer_letter, 0)
+            if correct_idx >= len(options):
+                correct_idx = 0
+            
+            q_id = db.add_question(topic_id, question_text, options, correct_idx, 0.1, explanation)
+            del context.user_data["creating"]
+            context.user_data.pop("question_topic_id", None)
+            
+            await update.message.reply_text(
+                f"✅ Вопрос добавлен! (ID: {q_id})",
+                reply_markup=back_to_admin_keyboard()
+            )
+            return
+        
+        if context.user_data.get("creating") == "questions_bulk":
+            # Parse bulk questions format
+            topic_match = re.search(r"TOPIC:\s*(\S+)", text)
+            if not topic_match:
+                await update.message.reply_text("❌ Не указан TOPIC")
+                return
+            topic_id = topic_match.group(1)
+            topic = db.get_topic(topic_id)
+            if not topic:
+                await update.message.reply_text(f"❌ Тема {topic_id} не найдена")
+                return
+            
+            # Split by Q: marker
+            questions_raw = re.split(r'\nQ:\s*', text)
+            added = 0
+            
+            for q_raw in questions_raw[1:]:  # Skip first (before first Q:)
+                lines = q_raw.strip().split("\n")
+                if not lines:
+                    continue
+                
+                question_text = lines[0].strip()
+                options = []
+                correct_idx = 0
+                explanation = None
+                
+                for line in lines[1:]:
+                    line = line.strip()
+                    if line.startswith("ANSWER:"):
+                        letter = line.split(":")[1].strip().upper()
+                        correct_idx = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(letter, 0)
+                    elif line.startswith("EXPLAIN:"):
+                        explanation = line.split(":", 1)[1].strip()
+                    elif len(line) > 2 and line[1] == ')':
+                        options.append({"text": line[2:].strip()})
+                
+                if len(options) >= 2:
+                    db.add_question(topic_id, question_text, options, correct_idx, 0.1, explanation)
+                    added += 1
+            
+            del context.user_data["creating"]
+            await update.message.reply_text(
+                f"✅ Импортировано {added} вопросов в тему {escape_html(topic['name'])}!",
+                reply_markup=back_to_admin_keyboard(),
+                parse_mode="HTML"
+            )
+            return
+        
         if context.user_data.get("feedback_for"):
             sub_id = context.user_data["feedback_for"]
             db.set_feedback(sub_id, text)
@@ -1658,6 +2466,71 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("archive_reason", None)
             await update.message.reply_text(f"✅ Студент архивирован!\n\n💬 Отзыв сохранён.", reply_markup=back_to_admin_keyboard())
             return
+    
+    # Student meeting request (outside admin block)
+    if context.user_data.get("creating") == "meeting_request":
+        student = db.get_student(user.id)
+        if not student:
+            await update.message.reply_text("⛔ Нужна регистрация")
+            return
+        
+        lines = text.strip().split("\n")
+        if len(lines) < 3:
+            await update.message.reply_text("❌ Нужно 3 строки: тема, дата/время, длительность")
+            return
+        
+        title = lines[0].strip()
+        try:
+            scheduled_at = datetime.strptime(lines[1].strip(), "%Y-%m-%d %H:%M").isoformat()
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат даты. Нужно: YYYY-MM-DD HH:MM")
+            return
+        try:
+            duration = int(lines[2].strip())
+        except ValueError:
+            duration = 30
+        
+        # Create meeting request (no link yet, status = requested)
+        meeting_id = db.create_meeting(student['id'], title, "", scheduled_at, duration, student['user_id'])
+        with db.get_db() as conn:
+            conn.execute("UPDATE meetings SET status = 'requested' WHERE id = ?", (meeting_id,))
+        
+        del context.user_data["creating"]
+        
+        # Notify all admins
+        with db.get_db() as conn:
+            admins = conn.execute("SELECT user_id FROM admins").fetchall()
+        
+        student_name = student.get('first_name') or student.get('username') or '?'
+        dt_str = lines[1].strip()
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Подтвердить", callback_data=f"meeting_approve:{meeting_id}")],
+            [InlineKeyboardButton("❌ Отклонить", callback_data=f"meeting_reject:{meeting_id}")]
+        ])
+        
+        for admin in admins:
+            try:
+                await context.bot.send_message(
+                    admin['user_id'],
+                    f"🔔 <b>Запрос на встречу!</b>\n\n"
+                    f"👤 От: <b>{escape_html(student_name)}</b>\n"
+                    f"📋 Тема: <b>{escape_html(title)}</b>\n"
+                    f"🕐 Время: {dt_str}\n"
+                    f"⏱ {duration} мин",
+                    parse_mode="HTML",
+                    reply_markup=keyboard
+                )
+            except Exception:
+                pass
+        
+        await update.message.reply_text(
+            f"✅ Запрос отправлен ментору!\n\n"
+            f"📋 {title}\n🕐 {dt_str}\n⏱ {duration} мин\n\n"
+            f"Ожидай подтверждения.",
+            reply_markup=back_to_menu_keyboard()
+        )
+        return
     
     task_id = context.user_data.get("pending_task")
     if task_id:
@@ -1864,6 +2737,56 @@ async def leaderboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=back_to_menu_keyboard(), parse_mode="HTML")
 
 
+# === MEETING REMINDERS BACKGROUND TASK ===
+
+async def send_meeting_reminders(context: ContextTypes.DEFAULT_TYPE):
+    """Background job to send meeting reminders"""
+    reminders = db.get_pending_reminders()
+    
+    for meeting in reminders:
+        reminder_type = meeting['reminder_type']
+        time_text = "24 часа" if reminder_type == '24h' else "1 час"
+        emoji = "⏰" if reminder_type == '1h' else "📅"
+        
+        dt = meeting['scheduled_at'][:16].replace('T', ' ')
+        
+        message = (
+            f"{emoji} <b>Напоминание о встрече!</b>\n\n"
+            f"<b>{escape_html(meeting['title'])}</b>\n"
+            f"🕐 {dt} (через {time_text})\n"
+            f"⏱ {meeting['duration_minutes']} мин\n\n"
+            f"🔗 <a href='{meeting['meeting_link']}'>Открыть Телемост</a>"
+        )
+        
+        # Send to student
+        if meeting['student_id']:
+            student = db.get_student_by_id(meeting['student_id'])
+            if student:
+                try:
+                    await context.bot.send_message(
+                        student['user_id'],
+                        message,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True
+                    )
+                except Exception as e:
+                    print(f"Failed to send reminder to student {student['user_id']}: {e}")
+        
+        # Send to admin/mentor who created it
+        try:
+            await context.bot.send_message(
+                meeting['created_by'],
+                f"👤 <b>Напоминание (для ментора)</b>\n\n" + message,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            print(f"Failed to send reminder to admin {meeting['created_by']}: {e}")
+        
+        # Mark reminder as sent
+        db.mark_reminder_sent(meeting['id'], reminder_type)
+
+
 def main():
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("Set BOT_TOKEN!")
@@ -1930,8 +2853,20 @@ def main():
     app.add_handler(CallbackQueryHandler(skip_feedback_callback, pattern="^skip_feedback:"))
     app.add_handler(CallbackQueryHandler(archived_student_callback, pattern="^archived_student:"))
     app.add_handler(CallbackQueryHandler(restore_callback, pattern="^restore:"))
+    # New handlers for announcements, meetings, quiz
+    app.add_handler(CallbackQueryHandler(announcements_callback, pattern="^announcements:"))
+    app.add_handler(CallbackQueryHandler(meetings_callback, pattern="^meetings:"))
+    app.add_handler(CallbackQueryHandler(meeting_action_callback, pattern="^meeting_confirm:|^meeting_decline:|^meeting_approve:|^meeting_reject:"))
+    app.add_handler(CallbackQueryHandler(quiz_callback, pattern="^quiz:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.FileExtension("py"), handle_file))
+    
+    # Schedule meeting reminders check every 5 minutes
+    job_queue = app.job_queue
+    if job_queue:
+        job_queue.run_repeating(send_meeting_reminders, interval=300, first=10)
+        print("Meeting reminders job scheduled (every 5 min)")
+    
     print("Bot starting...")
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,
