@@ -14,6 +14,19 @@ def now_msk() -> datetime:
     """Get current time in Moscow timezone (UTC+3)"""
     return datetime.now(MSK).replace(tzinfo=None)
 
+def to_msk_str(iso_str: str, date_only: bool = False) -> str:
+    """Convert ISO timestamp string to MSK display format"""
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        dt_msk = dt + timedelta(hours=3)  # UTC -> MSK
+        if date_only:
+            return dt_msk.strftime("%Y-%m-%d")
+        return dt_msk.strftime("%m-%d %H:%M")
+    except:
+        return iso_str[:10] if date_only else iso_str[5:16].replace("T", " ")
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -918,7 +931,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "📢 <b>Объявления</b>\n\n"
         if announcements:
             for a in announcements:
-                date = a['created_at'][:10]
+                date = to_msk_str(a['created_at'], date_only=True)
                 text += f"• [{date}] <b>{escape_html(a['title'])}</b>\n"
         else:
             text += "<i>Пока нет объявлений</i>\n"
@@ -935,7 +948,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for m in meetings:
                 student = db.get_student_by_id(m['student_id']) if m['student_id'] else None
                 student_name = (student.get('first_name') or student.get('username') or '?') if student else 'Не назначен'
-                dt = m['scheduled_at'][:16].replace('T', ' ')
+                dt = to_msk_str(m['scheduled_at'])
                 status_emoji = {'pending': '⏳', 'confirmed': '✅', 'cancelled': '❌'}.get(m['status'], '⏳')
                 text += f"{status_emoji} <b>{escape_html(m['title'])}</b>\n"
                 text += f"   👤 {student_name} | 🕐 {dt}\n\n"
@@ -1199,7 +1212,7 @@ async def recent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "✅" if sub["passed"] else "❌"
         approved = "⭐" if sub.get("approved") else ""
         feedback = "💬" if sub.get("feedback") else ""
-        date = sub["submitted_at"][5:16].replace("T", " ") if sub["submitted_at"] else ""
+        date = to_msk_str(sub["submitted_at"])
         btn = f"{status}{approved}{feedback} #{sub['id']} {sub['task_id']} {date}"
         keyboard.append([InlineKeyboardButton(btn, callback_data=f"code:{sub['id']}")])
     keyboard.append([InlineKeyboardButton("« К студенту", callback_data=f"student:{student['user_id']}")])
@@ -1254,7 +1267,7 @@ async def attempts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "✅" if sub["passed"] else "❌"
         approved = "⭐" if sub.get("approved") else ""
         feedback = "💬" if sub.get("feedback") else ""
-        date = sub["submitted_at"][5:16].replace("T", " ") if sub["submitted_at"] else ""
+        date = to_msk_str(sub["submitted_at"])
         btn = f"{status}{approved}{feedback} #{sub['id']} {date}"
         keyboard.append([InlineKeyboardButton(btn, callback_data=f"code:{sub['id']}")])
     keyboard.append([InlineKeyboardButton("« К студенту", callback_data=f"student:{student['user_id']}")])
@@ -1281,7 +1294,7 @@ async def code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = sub["code"] or "[удалён]"
     if len(code) > 2500:
         code = code[:2500] + "\n...(обрезано)"
-    text = f"<b>{status}{approved}</b>\nID: <code>#{sub['id']}</code>\nЗадание: <code>{sub['task_id']}</code>\nВремя: {sub['submitted_at'][:16]}\n\n<pre>{escape_html(code)}</pre>"
+    text = f"<b>{status}{approved}</b>\nID: <code>#{sub['id']}</code>\nЗадание: <code>{sub['task_id']}</code>\nВремя: {to_msk_str(sub['submitted_at'])}\n\n<pre>{escape_html(code)}</pre>"
     if sub.get("feedback"):
         text += f"\n\n💬 <b>Фидбек:</b>\n{escape_html(sub['feedback'])}"
     
@@ -1584,7 +1597,7 @@ async def myattempts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         status = "✅" if sub["passed"] else "❌"
         approved = "⭐" if sub.get("approved") else ""
         feedback = "💬" if sub.get("feedback") else ""
-        date = sub["submitted_at"][5:16].replace("T", " ") if sub["submitted_at"] else ""
+        date = to_msk_str(sub["submitted_at"])
         task = db.get_task(sub["task_id"])
         task_title = task["title"][:20] if task else sub["task_id"]
         btn = f"{status}{approved}{feedback} {task_title} {date}"
@@ -1632,7 +1645,7 @@ async def mycode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"<b>{status}{approved}</b>\n"
         f"Задание: <b>{task_title}</b>\n"
-        f"Время: {sub['submitted_at'][:16]}\n\n"
+        f"Время: {to_msk_str(sub['submitted_at'])}\n\n"
         f"<pre>{escape_html(code)}</pre>"
     )
     
@@ -1970,7 +1983,7 @@ async def announcements_callback(update: Update, context: ContextTypes.DEFAULT_T
         text = "📢 <b>Объявления</b>\n\n"
         if announcements:
             for a in announcements:
-                date = a['created_at'][:10]
+                date = to_msk_str(a['created_at'], date_only=True)
                 text += f"• [{date}] <b>{escape_html(a['title'])}</b>\n"
                 if len(a['content']) > 100:
                     text += f"  {escape_html(a['content'][:100])}...\n"
@@ -2008,7 +2021,7 @@ async def meetings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if meetings:
             for m in meetings:
-                dt = m['scheduled_at'][:16].replace('T', ' ')
+                dt = to_msk_str(m['scheduled_at'])
                 status_emoji = {'pending': '⏳', 'confirmed': '✅', 'cancelled': '❌', 'requested': '🔔'}.get(m['status'], '⏳')
                 text += f"{status_emoji} <b>{escape_html(m['title'])}</b>\n"
                 text += f"   🕐 {dt} ({m['duration_minutes']} мин)\n"
@@ -2051,7 +2064,7 @@ async def meetings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for m in meetings[:15]:
                 student_obj = db.get_student_by_id(m['student_id']) if m['student_id'] else None
                 student_name = (student_obj.get('first_name') or student_obj.get('username') or '?') if student_obj else '—'
-                dt = m['scheduled_at'][:16].replace('T', ' ')
+                dt = to_msk_str(m['scheduled_at'])
                 status_emoji = {'pending': '⏳', 'confirmed': '✅', 'cancelled': '❌'}.get(m['status'], '⏳')
                 text += f"{status_emoji} <b>{escape_html(m['title'])}</b>\n"
                 text += f"   👤 {student_name} | 🕐 {dt}\n\n"
@@ -2082,7 +2095,7 @@ async def meeting_action_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(
             f"✅ <b>Встреча подтверждена!</b>\n\n"
             f"<b>{escape_html(meeting['title'])}</b>\n"
-            f"🕐 {meeting['scheduled_at'][:16].replace('T', ' ')}\n"
+            f"🕐 {to_msk_str(meeting['scheduled_at'])}\n"
             f"🔗 <a href='{meeting['meeting_link']}'>Открыть Телемост</a>\n\n"
             f"Напоминание придёт за 24 часа и за 1 час до встречи.",
             parse_mode="HTML",
@@ -2106,7 +2119,7 @@ async def meeting_action_callback(update: Update, context: ContextTypes.DEFAULT_
         
         student_obj = db.get_student_by_id(meeting['student_id']) if meeting['student_id'] else None
         student_name = (student_obj.get('first_name') or student_obj.get('username') or '?') if student_obj else '—'
-        dt = meeting['scheduled_at'][:16].replace('T', ' ')
+        dt = to_msk_str(meeting['scheduled_at'])
         
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:meetings")]])
         await query.edit_message_text(
@@ -2173,7 +2186,7 @@ async def quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if history:
             text += "<b>Последние попытки:</b>\n"
             for h in history:
-                date = h['started_at'][:10]
+                date = to_msk_str(h['started_at'], date_only=True)
                 score = f"{h['correct_answers']}/{h['total_questions']}"
                 points = f"+{h['points_earned']:.1f}"
                 status = "✅" if h['status'] == 'finished' else "⏳"
@@ -2489,7 +2502,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if meeting['student_id']:
                     student = db.get_student_by_id(meeting['student_id'])
                     if student:
-                        dt = meeting['scheduled_at'][:16].replace('T', ' ')
+                        dt = to_msk_str(meeting['scheduled_at'])
                         try:
                             await context.bot.send_message(
                                 student['user_id'],
@@ -2912,7 +2925,7 @@ async def send_meeting_reminders(context: ContextTypes.DEFAULT_TYPE):
         time_text = "24 часа" if reminder_type == '24h' else "1 час"
         emoji = "⏰" if reminder_type == '1h' else "📅"
         
-        dt = meeting['scheduled_at'][:16].replace('T', ' ')
+        dt = to_msk_str(meeting['scheduled_at'])
         
         message = (
             f"{emoji} <b>Напоминание о встрече!</b>\n\n"
