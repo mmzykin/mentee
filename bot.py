@@ -69,6 +69,15 @@ def escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+async def safe_answer(query, text=None, show_alert=False):
+    """Safely answer callback query, ignoring expired queries"""
+    try:
+        await query.answer(text, show_alert=show_alert)
+        return True
+    except Exception:
+        return False
+
+
 def parse_task_format(text: str) -> Optional[dict]:
     try:
         topic_match = re.search(r"TOPIC:\s*(\S+)", text)
@@ -194,7 +203,7 @@ async def notify_student(context: ContextTypes.DEFAULT_TYPE, student_user_id: in
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     user = update.effective_user
     is_admin = db.is_admin(user.id)
     action = query.data.split(":")[1]
@@ -261,7 +270,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def modules_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     user = update.effective_user
     student = db.get_student(user.id)
     student_id = student["id"] if student else None
@@ -287,7 +296,7 @@ async def modules_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def module_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     user = update.effective_user
     student = db.get_student(user.id)
     student_id = student["id"] if student else None
@@ -311,7 +320,7 @@ async def module_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def topic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     user = update.effective_user
     student = db.get_student(user.id)
     student_id = student["id"] if student else None
@@ -332,7 +341,7 @@ async def topic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     task_id = query.data.split(":")[1]
     task = db.get_task(task_id)
     if not task:
@@ -395,7 +404,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def opentask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Open task in normal mode (no timer allowed)"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     task_id = query.data.split(":")[1]
     # Mark that this task was opened without timer
     context.user_data["no_timer_task"] = task_id
@@ -419,13 +428,13 @@ async def starttimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if bet > 0 and student:
         stats = db.get_student_stats(student["id"])
         if stats["bonus_points"] < bet:
-            await query.answer(f"❌ Недостаточно баллов! У тебя: {stats['bonus_points']}⭐", show_alert=True)
+            await safe_answer(query, f"❌ Недостаточно баллов! У тебя: {stats['bonus_points']}⭐", show_alert=True)
             return
         # Deduct bet immediately
         db.add_bonus_points(student["id"], -bet)
     
     bet_text = f" (ставка {bet}⭐)" if bet > 0 else ""
-    await query.answer(f"⏱ Таймер запущен!{bet_text}")
+    await safe_answer(query, f"⏱ Таймер запущен!{bet_text}")
     
     # Clear no_timer mode if was set
     context.user_data.pop("no_timer_task", None)
@@ -452,9 +461,9 @@ async def resettimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         student = db.get_student(user.id)
         if student:
             db.add_bonus_points(student["id"], timer_info["bet"])
-        await query.answer(f"⏱ Таймер сброшен! Ставка {timer_info['bet']}⭐ возвращена")
+        await safe_answer(query, f"⏱ Таймер сброшен! Ставка {timer_info['bet']}⭐ возвращена")
     else:
-        await query.answer("⏱ Таймер сброшен!")
+        await safe_answer(query, "⏱ Таймер сброшен!")
     
     context.user_data.pop("task_timer", None)
     # Refresh task view
@@ -469,14 +478,14 @@ async def dailyspin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     student = db.get_student(user.id)
     
     if not student:
-        await query.answer("⛔ Не зарегистрирован")
+        await safe_answer(query, "⛔ Не зарегистрирован")
         return
     
     if not db.can_spin_daily(student["id"]):
-        await query.answer("🎰 Уже крутил сегодня! Приходи завтра", show_alert=True)
+        await safe_answer(query, "🎰 Уже крутил сегодня! Приходи завтра", show_alert=True)
         return
     
-    await query.answer()
+    await safe_answer(query)
     
     # Spin animation message
     spin_msg = await query.edit_message_text("🎰 <b>Крутим рулетку...</b>\n\n🎡 🎡 🎡", parse_mode="HTML")
@@ -510,17 +519,17 @@ async def gamble_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     student = db.get_student(user.id)
     
     if not student:
-        await query.answer("⛔")
+        await safe_answer(query, "⛔")
         return
     
     amount = int(query.data.split(":")[1])
     stats = db.get_student_stats(student["id"])
     
     if stats["bonus_points"] < amount:
-        await query.answer(f"❌ Недостаточно баллов! У тебя: {stats['bonus_points']}⭐", show_alert=True)
+        await safe_answer(query, f"❌ Недостаточно баллов! У тебя: {stats['bonus_points']}⭐", show_alert=True)
         return
     
-    await query.answer()
+    await safe_answer(query)
     
     won, new_balance = db.gamble_points(student["id"], amount)
     
@@ -545,7 +554,7 @@ async def gamble_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     user = update.effective_user
     if not db.is_registered(user.id) and not db.is_admin(user.id):
         await query.edit_message_text("⛔ /register")
@@ -573,7 +582,7 @@ async def submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -690,7 +699,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -738,7 +747,7 @@ async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -777,7 +786,7 @@ async def student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def recent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -803,7 +812,7 @@ async def recent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def bytask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -831,7 +840,7 @@ async def bytask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def attempts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -858,7 +867,7 @@ async def attempts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -912,12 +921,12 @@ async def code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not db.is_admin(update.effective_user.id):
-        await query.answer("⛔")
+        await safe_answer(query, "⛔")
         return
     sub_id = int(query.data.split(":")[1])
     sub = db.get_submission_by_id(sub_id)
     if db.approve_submission(sub_id, BONUS_POINTS_PER_APPROVAL):
-        await query.answer("⭐ Аппрувнуто!", show_alert=True)
+        await safe_answer(query, "⭐ Аппрувнуто!", show_alert=True)
         # Notify student
         if sub:
             student = db.get_student_by_id(sub["student_id"])
@@ -931,18 +940,18 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Вы получили +{BONUS_POINTS_PER_APPROVAL} бонус!"
                 )
     else:
-        await query.answer("Уже или ошибка.", show_alert=True)
+        await safe_answer(query, "Уже или ошибка.", show_alert=True)
     await code_callback(update, context)
 
 
 async def unapprove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not db.is_admin(update.effective_user.id):
-        await query.answer("⛔")
+        await safe_answer(query, "⛔")
         return
     sub_id = int(query.data.split(":")[1])
     db.unapprove_submission(sub_id)
-    await query.answer("Отменено.", show_alert=True)
+    await safe_answer(query, "Отменено.", show_alert=True)
     await code_callback(update, context)
 
 
@@ -950,7 +959,7 @@ async def cheater_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """GOD MODE: Punish cheater - mark as failed and remove points"""
     query = update.callback_query
     if not db.is_admin(update.effective_user.id):
-        await query.answer("⛔")
+        await safe_answer(query, "⛔")
         return
     
     parts = query.data.split(":")
@@ -959,13 +968,13 @@ async def cheater_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     sub = db.get_submission_by_id(sub_id)
     if not sub:
-        await query.answer("Не найден.")
+        await safe_answer(query, "Не найден.")
         return
     
     if db.punish_cheater(sub_id, penalty):
         student = db.get_student_by_id(sub["student_id"])
         penalty_text = f" и -{penalty}⭐" if penalty > 0 else ""
-        await query.answer(f"🚨 Списывание отмечено{penalty_text}!", show_alert=True)
+        await safe_answer(query, f"🚨 Списывание отмечено{penalty_text}!", show_alert=True)
         
         # Notify student about punishment
         if student:
@@ -978,14 +987,14 @@ async def cheater_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Решение аннулировано" + (f", штраф: -{penalty}⭐" if penalty > 0 else "")
             )
     else:
-        await query.answer("Ошибка.", show_alert=True)
+        await safe_answer(query, "Ошибка.", show_alert=True)
     
     await code_callback(update, context)
 
 
 async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -998,20 +1007,20 @@ async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def delsub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not db.is_admin(update.effective_user.id):
-        await query.answer("⛔")
+        await safe_answer(query, "⛔")
         return
     sub_id = int(query.data.split(":")[1])
     sub = db.get_submission_by_id(sub_id)
     if sub and db.delete_submission(sub_id):
-        await query.answer("Удалено!", show_alert=True)
+        await safe_answer(query, "Удалено!", show_alert=True)
         await recent_callback(update, context)
     else:
-        await query.answer("Ошибка.", show_alert=True)
+        await safe_answer(query, "Ошибка.", show_alert=True)
 
 
 async def assign_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -1034,7 +1043,7 @@ async def assign_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def assignmod_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -1052,7 +1061,7 @@ async def assignmod_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def assigntopic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -1075,19 +1084,19 @@ async def assigntopic_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def toggleassign_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not db.is_admin(update.effective_user.id):
-        await query.answer("⛔")
+        await safe_answer(query, "⛔")
         return
     task_id = query.data.split(":")[1]
     student_id = context.user_data.get("assigning_to")
     if not student_id:
-        await query.answer("Ошибка.")
+        await safe_answer(query, "Ошибка.")
         return
     if db.is_task_assigned(student_id, task_id):
         db.unassign_task(student_id, task_id)
-        await query.answer("Снято!")
+        await safe_answer(query, "Снято!")
     else:
         db.assign_task(student_id, task_id)
-        await query.answer("Назначено!")
+        await safe_answer(query, "Назначено!")
         # Notify student about new assignment with direct button
         student = db.get_student_by_id(student_id)
         task = db.get_task(task_id)
@@ -1113,7 +1122,7 @@ async def toggleassign_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def assigned_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -1136,13 +1145,13 @@ async def assigned_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def unassign_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not db.is_admin(update.effective_user.id):
-        await query.answer("⛔")
+        await safe_answer(query, "⛔")
         return
     parts = query.data.split(":")
     student_id = int(parts[1])
     task_id = parts[2]
     db.unassign_task(student_id, task_id)
-    await query.answer("Снято!")
+    await safe_answer(query, "Снято!")
     context.user_data["assigning_to"] = student_id
     await assigned_callback(update, context)
 
@@ -1150,7 +1159,7 @@ async def unassign_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def myattempts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Student's own attempts"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     user = update.effective_user
     student = db.get_student(user.id)
     if not student:
@@ -1201,7 +1210,7 @@ async def myattempts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def mycode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Student views their own submission"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     user = update.effective_user
     student = db.get_student(user.id)
     if not student:
@@ -1241,7 +1250,7 @@ async def mycode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def myassigned_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Student's assigned tasks"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     user = update.effective_user
     student = db.get_student(user.id)
     if not student:
@@ -1271,7 +1280,7 @@ async def myassigned_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def editname_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin edits student name"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -1296,7 +1305,7 @@ async def editname_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def hired_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin marks student as hired"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -1331,7 +1340,7 @@ async def hired_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def archive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin archives student with reason, asks for feedback"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -1372,7 +1381,7 @@ async def archive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def skip_feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Archive without feedback"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -1391,7 +1400,7 @@ async def skip_feedback_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def archived_student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View archived student details"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
@@ -1441,7 +1450,7 @@ async def restore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Restore archived student"""
     query = update.callback_query
     if not db.is_admin(update.effective_user.id):
-        await query.answer("⛔")
+        await safe_answer(query, "⛔")
         return
     
     student_id = int(query.data.split(":")[1])
@@ -1453,7 +1462,7 @@ async def restore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (student_id,)
         )
     
-    await query.answer("✅ Студент восстановлен!", show_alert=True)
+    await safe_answer(query, "✅ Студент восстановлен!", show_alert=True)
     await query.edit_message_text("✅ Студент восстановлен и снова активен.", reply_markup=back_to_admin_keyboard())
 
 
@@ -1804,7 +1813,14 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.FileExtension("py"), handle_file))
     print("Bot starting...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,  # Игнорировать старые сообщения при старте
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30,
+        pool_timeout=30,
+    )
 
 
 if __name__ == "__main__":
