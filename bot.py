@@ -339,10 +339,8 @@ async def topic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"📚 <b>{escape_html(topic['name'])}</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
-async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await safe_answer(query)
-    task_id = query.data.split(":")[1]
+async def show_task_view(query, context, task_id: str):
+    """Helper to display task view"""
     task = db.get_task(task_id)
     if not task:
         await query.edit_message_text("Не найден.")
@@ -401,6 +399,13 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard_rows), parse_mode="HTML")
 
 
+async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await safe_answer(query)
+    task_id = query.data.split(":")[1]
+    await show_task_view(query, context, task_id)
+
+
 async def opentask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Open task in normal mode (no timer allowed)"""
     query = update.callback_query
@@ -411,8 +416,7 @@ async def opentask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Clear any timer for this task
     context.user_data.pop("task_timer", None)
     # Show the task
-    query.data = f"task:{task_id}"
-    await task_callback(update, context)
+    await show_task_view(query, context, task_id)
 
 
 async def starttimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -445,8 +449,7 @@ async def starttimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         "bet": bet
     }
     # Refresh task view to show timer
-    query.data = f"task:{task_id}"
-    await task_callback(update, context)
+    await show_task_view(query, context, task_id)
 
 
 async def resettimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -467,8 +470,7 @@ async def resettimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     context.user_data.pop("task_timer", None)
     # Refresh task view
-    query.data = f"task:{task_id}"
-    await task_callback(update, context)
+    await show_task_view(query, context, task_id)
 
 
 async def dailyspin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
