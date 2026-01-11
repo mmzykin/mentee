@@ -660,4 +660,20 @@ def gamble_points(student_id: int, amount: int) -> tuple[bool, int]:
         return won, current + change
 
 
+def get_cheaters_board() -> List[Dict]:
+    """Get list of cheaters with their cheat count"""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT 
+                s.id, s.user_id, s.username, s.first_name,
+                COUNT(sub.id) as cheat_count
+            FROM students s
+            JOIN submissions sub ON s.id = sub.student_id
+            WHERE sub.feedback LIKE '%🚨 СПИСАНО%'
+            GROUP BY s.id
+            ORDER BY cheat_count DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
 init_db()

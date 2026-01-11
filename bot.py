@@ -249,7 +249,30 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if l["bonus_points"] > 0:
                 text += f" +{l['bonus_points']}⭐"
             text += f" = <b>{l['score']}</b>\n"
-        await query.edit_message_text(text, reply_markup=back_to_menu_keyboard(), parse_mode="HTML")
+        keyboard = [
+            [InlineKeyboardButton("💀 Доска позора", callback_data="menu:shameboard")],
+            [InlineKeyboardButton("« Главное меню", callback_data="menu:main")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    elif action == "shameboard":
+        cheaters = db.get_cheaters_board()
+        if not cheaters:
+            text = "💀 <b>Доска позора</b>\n\n✨ Пока чисто! Все честные."
+        else:
+            text = "💀 <b>ДОСКА ПОЗОРА</b> 💀\n\n"
+            text += "🚨 <i>Пойманы на списывании:</i>\n\n"
+            shame_emoji = ["🤡", "🐀", "🦨", "💩", "🐍", "🦝", "🐛", "🪳"]
+            for i, c in enumerate(cheaters):
+                name = escape_html(c.get("first_name") or c.get("username") or "???")
+                emoji = shame_emoji[i % len(shame_emoji)]
+                count = c["cheat_count"]
+                text += f"{emoji} <b>{name}</b> — {count} списываний\n"
+            text += "\n<i>Не списывай — будь честен!</i>"
+        keyboard = [
+            [InlineKeyboardButton("🏆 Лидерборд", callback_data="menu:leaderboard")],
+            [InlineKeyboardButton("« Главное меню", callback_data="menu:main")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     elif action == "admin":
         if not is_admin:
             await query.edit_message_text("⛔")
