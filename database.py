@@ -479,4 +479,58 @@ def is_task_assigned(student_id: int, task_id: str) -> bool:
         return result is not None
 
 
+def update_student_name(student_id: int, new_name: str) -> bool:
+    with get_db() as conn:
+        conn.execute("UPDATE students SET first_name = ? WHERE id = ?", (new_name, student_id))
+        return True
+
+
+def delete_student(student_id: int) -> bool:
+    with get_db() as conn:
+        conn.execute("DELETE FROM assigned_tasks WHERE student_id = ?", (student_id,))
+        conn.execute("DELETE FROM submissions WHERE student_id = ?", (student_id,))
+        result = conn.execute("DELETE FROM students WHERE id = ?", (student_id,))
+        return result.rowcount > 0
+
+
+def archive_student(student_id: int, reason: str, feedback: str) -> bool:
+    """Archives student with a reason (e.g. HIRED) and feedback"""
+    with get_db() as conn:
+        # Add archived_at and archive columns if not exist
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(students)").fetchall()}
+        if "archived_at" not in cols:
+            conn.execute("ALTER TABLE students ADD COLUMN archived_at TEXT")
+        if "archive_reason" not in cols:
+            conn.execute("ALTER TABLE students ADD COLUMN archive_reason TEXT")
+        if "archive_feedback" not in cols:
+            conn.execute("ALTER TABLE students ADD COLUMN archive_feedback TEXT")
+        
+        conn.execute(
+            "UPDATE students SET archived_at = ?, archive_reason = ?, archive_feedback = ? WHERE id = ?",
+            (datetime.now().isoformat(), reason, feedback, student_id)
+        )
+        return True
+
+
+def get_archived_students() -> List[Dict]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM students WHERE archived_at IS NOT NULL ORDER BY archived_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_active_students() -> List[Dict]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM students WHERE archived_at IS NULL ORDER BY registered_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_active_students_stats() -> List[Dict]:
+    students = get_active_students()
+    result = []
+    for student in students:
+        stats = get_student_stats(student["id"])
+        result.append({**student, **stats})
+    return result
+
+
 init_db()

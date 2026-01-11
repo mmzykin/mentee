@@ -174,6 +174,16 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Неверный код.")
 
 
+async def notify_student(context: ContextTypes.DEFAULT_TYPE, student_user_id: int, message: str):
+    """Send notification to student"""
+    try:
+        await context.bot.send_message(chat_id=student_user_id, text=message, parse_mode="HTML")
+        return True
+    except Exception as e:
+        print(f"Failed to notify student {student_user_id}: {e}")
+        return False
+
+
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -191,7 +201,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = db.get_student_stats(student["id"])
         assigned = db.get_assigned_tasks(student["id"])
         text = (
-            f"📊 <b>Статистика</b>\n\n"
+            f"📊 <b>Моя статистика</b>\n\n"
             f"✅ Решено: <b>{stats['solved_tasks']}</b>/{stats['total_tasks']}\n"
             f"⭐ Бонусы: <b>{stats['bonus_points']}</b>\n"
             f"🎖 Аппрувов: <b>{stats['approved_count']}</b>\n"
@@ -199,7 +209,12 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if assigned:
             text += f"\n📌 Назначено: <b>{len(assigned)}</b>"
-        await query.edit_message_text(text, reply_markup=back_to_menu_keyboard(), parse_mode="HTML")
+        keyboard = [
+            [InlineKeyboardButton("📋 Мои попытки", callback_data="myattempts:0")],
+            [InlineKeyboardButton("📌 Назначенные мне", callback_data="myassigned:0")],
+            [InlineKeyboardButton("« Главное меню", callback_data="menu:main")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     elif action == "leaderboard":
         leaders = db.get_leaderboard(15)
         if not leaders:
@@ -402,8 +417,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
     
     elif action == "students":
-        students = db.get_all_students_stats()
-        if not students:
+        students = db.get_active_students_stats()
+        archived = db.get_archived_students()
+        if not students and not archived:
             await query.edit_message_text("Нет студентов.", reply_markup=back_to_admin_keyboard())
             return
         keyboard = []
@@ -411,8 +427,25 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = s.get("first_name") or s.get("username") or "?"
             btn = f"{name}: {s['solved_tasks']}/{s['total_tasks']} +{s['bonus_points']}⭐"
             keyboard.append([InlineKeyboardButton(btn, callback_data=f"student:{s['user_id']}")])
+        if archived:
+            keyboard.append([InlineKeyboardButton(f"🎓 Выпускники ({len(archived)})", callback_data="admin:archived")])
         keyboard.append([InlineKeyboardButton("« Админ", callback_data="menu:admin")])
-        await query.edit_message_text("👥 <b>Студенты</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        text = f"👥 <b>Активные студенты</b> ({len(students)})"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    
+    elif action == "archived":
+        archived = db.get_archived_students()
+        if not archived:
+            await query.edit_message_text("Нет выпускников.", reply_markup=back_to_admin_keyboard())
+            return
+        keyboard = []
+        for s in archived:
+            name = s.get("first_name") or s.get("username") or "?"
+            reason = s.get("archive_reason", "")
+            btn = f"🎓 {name} ({reason})"
+            keyboard.append([InlineKeyboardButton(btn, callback_data=f"archived_student:{s['user_id']}")])
+        keyboard.append([InlineKeyboardButton("« Студенты", callback_data="admin:students")])
+        await query.edit_message_text("🎓 <b>Выпускники</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     
     elif action == "codes":
         codes = db.get_unused_codes()
@@ -499,10 +532,12 @@ async def student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Не найден.")
         return
     name = escape_html(student.get("first_name") or student.get("username") or "?")
+    username = f"@{student.get('username')}" if student.get("username") else "нет username"
     stats = db.get_student_stats(student["id"])
     assigned = db.get_assigned_tasks(student["id"])
     text = (
         f"📋 <b>{name}</b>\n"
+        f"👤 {username}\n"
         f"ID: <code>{user_id}</code>\n\n"
         f"✅ {stats['solved_tasks']}/{stats['total_tasks']}\n"
         f"⭐ Бонусов: {stats['bonus_points']}\n"
@@ -512,6 +547,10 @@ async def student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 Последние 10 попыток", callback_data=f"recent:{student['id']}")],
         [InlineKeyboardButton("📝 По заданиям", callback_data=f"bytask:{student['id']}")],
         [InlineKeyboardButton("📌 Назначить задание", callback_data=f"assign:{student['id']}")],
+        [
+            InlineKeyboardButton("✏️ Изменить имя", callback_data=f"editname:{student['id']}"),
+        ],
+        [InlineKeyboardButton("🎉 Устроен на работу", callback_data=f"hired:{student['id']}")],
         [InlineKeyboardButton("« Студенты", callback_data="admin:students")]
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -636,8 +675,21 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⛔")
         return
     sub_id = int(query.data.split(":")[1])
+    sub = db.get_submission_by_id(sub_id)
     if db.approve_submission(sub_id, BONUS_POINTS_PER_APPROVAL):
         await query.answer("⭐ Аппрувнуто!", show_alert=True)
+        # Notify student
+        if sub:
+            student = db.get_student_by_id(sub["student_id"])
+            if student:
+                task = db.get_task(sub["task_id"])
+                task_name = task["title"] if task else sub["task_id"]
+                await notify_student(
+                    context, student["user_id"],
+                    f"⭐ <b>Ваше решение аппрувнуто!</b>\n\n"
+                    f"Задание: <b>{escape_html(task_name)}</b>\n"
+                    f"Вы получили +{BONUS_POINTS_PER_APPROVAL} бонус!"
+                )
     else:
         await query.answer("Уже или ошибка.", show_alert=True)
     await code_callback(update, context)
@@ -759,6 +811,17 @@ async def toggleassign_callback(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         db.assign_task(student_id, task_id)
         await query.answer("Назначено!")
+        # Notify student about new assignment
+        student = db.get_student_by_id(student_id)
+        task = db.get_task(task_id)
+        if student and task:
+            await notify_student(
+                context, student["user_id"],
+                f"📌 <b>Вам назначено новое задание!</b>\n\n"
+                f"<b>{escape_html(task['title'])}</b>\n"
+                f"ID: <code>{task_id}</code>\n\n"
+                f"Откройте 📚 Задания для просмотра."
+            )
     task = db.get_task(task_id)
     if task:
         await assigntopic_callback(update, context)
@@ -798,6 +861,316 @@ async def unassign_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("Снято!")
     context.user_data["assigning_to"] = student_id
     await assigned_callback(update, context)
+
+
+async def myattempts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Student's own attempts"""
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    student = db.get_student(user.id)
+    if not student:
+        await query.edit_message_text("Не зарегистрирован.", reply_markup=back_to_menu_keyboard())
+        return
+    
+    parts = query.data.split(":")
+    page = int(parts[1]) if len(parts) > 1 else 0
+    per_page = 10
+    
+    subs = db.get_student_submissions(student["id"])
+    total = len(subs)
+    start = page * per_page
+    end = start + per_page
+    page_subs = subs[start:end]
+    
+    if not subs:
+        text = "📋 <b>Мои попытки</b>\n\n<i>Пока нет попыток</i>"
+        keyboard = [[InlineKeyboardButton("« Назад", callback_data="menu:mystats")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return
+    
+    text = f"📋 <b>Мои попытки</b> ({total} всего)\n\n"
+    keyboard = []
+    for sub in page_subs:
+        status = "✅" if sub["passed"] else "❌"
+        approved = "⭐" if sub.get("approved") else ""
+        feedback = "💬" if sub.get("feedback") else ""
+        date = sub["submitted_at"][5:16].replace("T", " ") if sub["submitted_at"] else ""
+        task = db.get_task(sub["task_id"])
+        task_title = task["title"][:20] if task else sub["task_id"]
+        btn = f"{status}{approved}{feedback} {task_title} {date}"
+        keyboard.append([InlineKeyboardButton(btn, callback_data=f"mycode:{sub['id']}")])
+    
+    # Pagination
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️", callback_data=f"myattempts:{page-1}"))
+    if end < total:
+        nav_row.append(InlineKeyboardButton("➡️", callback_data=f"myattempts:{page+1}"))
+    if nav_row:
+        keyboard.append(nav_row)
+    
+    keyboard.append([InlineKeyboardButton("« Назад", callback_data="menu:mystats")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def mycode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Student views their own submission"""
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    student = db.get_student(user.id)
+    if not student:
+        await query.edit_message_text("Не зарегистрирован.", reply_markup=back_to_menu_keyboard())
+        return
+    
+    sub_id = int(query.data.split(":")[1])
+    sub = db.get_submission_by_id(sub_id)
+    
+    if not sub or sub["student_id"] != student["id"]:
+        await query.edit_message_text("Не найдено.", reply_markup=back_to_menu_keyboard())
+        return
+    
+    status = "✅ Решено" if sub["passed"] else "❌ Не пройдено"
+    approved = " ⭐Аппрувнуто" if sub.get("approved") else ""
+    task = db.get_task(sub["task_id"])
+    task_title = escape_html(task["title"]) if task else sub["task_id"]
+    
+    code = sub["code"] or "[удалён]"
+    if len(code) > 2000:
+        code = code[:2000] + "\n...(обрезано)"
+    
+    text = (
+        f"<b>{status}{approved}</b>\n"
+        f"Задание: <b>{task_title}</b>\n"
+        f"Время: {sub['submitted_at'][:16]}\n\n"
+        f"<pre>{escape_html(code)}</pre>"
+    )
+    
+    if sub.get("feedback"):
+        text += f"\n\n💬 <b>Фидбек от ментора:</b>\n{escape_html(sub['feedback'])}"
+    
+    keyboard = [[InlineKeyboardButton("« Мои попытки", callback_data="myattempts:0")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def myassigned_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Student's assigned tasks"""
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    student = db.get_student(user.id)
+    if not student:
+        await query.edit_message_text("Не зарегистрирован.", reply_markup=back_to_menu_keyboard())
+        return
+    
+    assigned = db.get_assigned_tasks(student["id"])
+    
+    if not assigned:
+        text = "📌 <b>Назначенные мне задания</b>\n\n<i>Пока ничего не назначено</i>"
+        keyboard = [[InlineKeyboardButton("« Назад", callback_data="menu:mystats")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return
+    
+    text = f"📌 <b>Назначенные мне задания</b> ({len(assigned)})\n\n"
+    keyboard = []
+    for t in assigned:
+        solved = db.has_solved(student["id"], t["task_id"])
+        status = "✅" if solved else "⬜"
+        btn = f"{status} {t['title']}"
+        keyboard.append([InlineKeyboardButton(btn, callback_data=f"task:{t['task_id']}")])
+    
+    keyboard.append([InlineKeyboardButton("« Назад", callback_data="menu:mystats")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def editname_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin edits student name"""
+    query = update.callback_query
+    await query.answer()
+    if not db.is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔")
+        return
+    
+    student_id = int(query.data.split(":")[1])
+    student = db.get_student_by_id(student_id)
+    if not student:
+        await query.edit_message_text("Не найден.")
+        return
+    
+    context.user_data["editing_student_name"] = student_id
+    name = escape_html(student.get("first_name") or "?")
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"student:{student['user_id']}")]])
+    await query.edit_message_text(
+        f"✏️ <b>Редактирование имени</b>\n\n"
+        f"Текущее имя: <b>{name}</b>\n\n"
+        f"Отправь новое имя для студента:",
+        reply_markup=keyboard, parse_mode="HTML"
+    )
+
+
+async def hired_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin marks student as hired"""
+    query = update.callback_query
+    await query.answer()
+    if not db.is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔")
+        return
+    
+    student_id = int(query.data.split(":")[1])
+    student = db.get_student_by_id(student_id)
+    if not student:
+        await query.edit_message_text("Не найден.")
+        return
+    
+    name = escape_html(student.get("first_name") or "?")
+    stats = db.get_student_stats(student_id)
+    
+    text = (
+        f"🎉 <b>Архивировать студента</b>\n\n"
+        f"Студент: <b>{name}</b>\n"
+        f"Решено: {stats['solved_tasks']}/{stats['total_tasks']}\n"
+        f"Бонусы: {stats['bonus_points']}⭐\n\n"
+        f"Выберите причину:"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🎉 Устроен на работу", callback_data=f"archive:{student_id}:HIRED")],
+        [InlineKeyboardButton("📚 Завершил обучение", callback_data=f"archive:{student_id}:GRADUATED")],
+        [InlineKeyboardButton("🚫 Отчислен", callback_data=f"archive:{student_id}:EXPELLED")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"student:{student['user_id']}")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def archive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin archives student with reason, asks for feedback"""
+    query = update.callback_query
+    await query.answer()
+    if not db.is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔")
+        return
+    
+    parts = query.data.split(":")
+    student_id = int(parts[1])
+    reason = parts[2]
+    
+    student = db.get_student_by_id(student_id)
+    if not student:
+        await query.edit_message_text("Не найден.")
+        return
+    
+    context.user_data["archiving_student"] = student_id
+    context.user_data["archive_reason"] = reason
+    
+    name = escape_html(student.get("first_name") or "?")
+    reason_text = {
+        "HIRED": "🎉 Устроен на работу",
+        "GRADUATED": "📚 Завершил обучение",
+        "EXPELLED": "🚫 Отчислен"
+    }.get(reason, reason)
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭ Пропустить", callback_data=f"skip_feedback:{student_id}:{reason}")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"student:{student['user_id']}")]
+    ])
+    
+    await query.edit_message_text(
+        f"📝 <b>Обратная связь</b>\n\n"
+        f"Студент: <b>{name}</b>\n"
+        f"Статус: {reason_text}\n\n"
+        f"Напишите отзыв о студенте (куда устроился, как прошло обучение, комментарии):",
+        reply_markup=keyboard, parse_mode="HTML"
+    )
+
+
+async def skip_feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Archive without feedback"""
+    query = update.callback_query
+    await query.answer()
+    if not db.is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔")
+        return
+    
+    parts = query.data.split(":")
+    student_id = int(parts[1])
+    reason = parts[2]
+    
+    db.archive_student(student_id, reason, "")
+    context.user_data.pop("archiving_student", None)
+    context.user_data.pop("archive_reason", None)
+    
+    await query.edit_message_text("✅ Студент архивирован!", reply_markup=back_to_admin_keyboard())
+
+
+async def archived_student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View archived student details"""
+    query = update.callback_query
+    await query.answer()
+    if not db.is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔")
+        return
+    
+    user_id = int(query.data.split(":")[1])
+    student = db.get_student(user_id)
+    if not student:
+        await query.edit_message_text("Не найден.")
+        return
+    
+    name = escape_html(student.get("first_name") or "?")
+    username = f"@{student.get('username')}" if student.get("username") else "нет username"
+    stats = db.get_student_stats(student["id"])
+    
+    reason = student.get("archive_reason", "?")
+    reason_text = {
+        "HIRED": "🎉 Устроен на работу",
+        "GRADUATED": "📚 Завершил обучение",
+        "EXPELLED": "🚫 Отчислен"
+    }.get(reason, reason)
+    
+    archived_at = student.get("archived_at", "?")[:10] if student.get("archived_at") else "?"
+    
+    text = (
+        f"🎓 <b>{name}</b>\n"
+        f"👤 {username}\n"
+        f"ID: <code>{user_id}</code>\n\n"
+        f"📊 Итоги:\n"
+        f"✅ Решено: {stats['solved_tasks']}/{stats['total_tasks']}\n"
+        f"⭐ Бонусов: {stats['bonus_points']}\n\n"
+        f"📋 Статус: {reason_text}\n"
+        f"📅 Дата: {archived_at}"
+    )
+    
+    if student.get("archive_feedback"):
+        text += f"\n\n💬 <b>Отзыв:</b>\n{escape_html(student['archive_feedback'])}"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Восстановить", callback_data=f"restore:{student['id']}")],
+        [InlineKeyboardButton("« Выпускники", callback_data="admin:archived")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def restore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Restore archived student"""
+    query = update.callback_query
+    if not db.is_admin(update.effective_user.id):
+        await query.answer("⛔")
+        return
+    
+    student_id = int(query.data.split(":")[1])
+    
+    # Clear archive fields
+    with db.get_db() as conn:
+        conn.execute(
+            "UPDATE students SET archived_at = NULL, archive_reason = NULL, archive_feedback = NULL WHERE id = ?",
+            (student_id,)
+        )
+    
+    await query.answer("✅ Студент восстановлен!", show_alert=True)
+    await query.edit_message_text("✅ Студент восстановлен и снова активен.", reply_markup=back_to_admin_keyboard())
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -852,6 +1225,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.set_feedback(sub_id, text)
             del context.user_data["feedback_for"]
             await update.message.reply_text(f"💬 Фидбек сохранён для #{sub_id}!", reply_markup=back_to_admin_keyboard())
+            # Notify student about feedback
+            sub = db.get_submission_by_id(sub_id)
+            if sub:
+                student = db.get_student_by_id(sub["student_id"])
+                if student:
+                    task = db.get_task(sub["task_id"])
+                    task_name = task["title"] if task else sub["task_id"]
+                    await notify_student(
+                        context, student["user_id"],
+                        f"💬 <b>Новый фидбек от ментора!</b>\n\n"
+                        f"Задание: <b>{escape_html(task_name)}</b>\n\n"
+                        f"{escape_html(text)}"
+                    )
+            return
+        
+        if context.user_data.get("editing_student_name"):
+            student_id = context.user_data["editing_student_name"]
+            db.update_student_name(student_id, text)
+            del context.user_data["editing_student_name"]
+            student = db.get_student_by_id(student_id)
+            await update.message.reply_text(f"✅ Имя изменено на: {escape_html(text)}", reply_markup=back_to_admin_keyboard())
+            return
+        
+        if context.user_data.get("archiving_student"):
+            student_id = context.user_data["archiving_student"]
+            reason = context.user_data.get("archive_reason", "HIRED")
+            db.archive_student(student_id, reason, text)
+            del context.user_data["archiving_student"]
+            context.user_data.pop("archive_reason", None)
+            await update.message.reply_text(f"✅ Студент архивирован!\n\n💬 Отзыв сохранён.", reply_markup=back_to_admin_keyboard())
             return
     
     task_id = context.user_data.get("pending_task")
@@ -1044,6 +1447,15 @@ def main():
     app.add_handler(CallbackQueryHandler(toggleassign_callback, pattern="^toggleassign:"))
     app.add_handler(CallbackQueryHandler(assigned_callback, pattern="^assigned:"))
     app.add_handler(CallbackQueryHandler(unassign_callback, pattern="^unassign:"))
+    app.add_handler(CallbackQueryHandler(myattempts_callback, pattern="^myattempts:"))
+    app.add_handler(CallbackQueryHandler(mycode_callback, pattern="^mycode:"))
+    app.add_handler(CallbackQueryHandler(myassigned_callback, pattern="^myassigned:"))
+    app.add_handler(CallbackQueryHandler(editname_callback, pattern="^editname:"))
+    app.add_handler(CallbackQueryHandler(hired_callback, pattern="^hired:"))
+    app.add_handler(CallbackQueryHandler(archive_callback, pattern="^archive:"))
+    app.add_handler(CallbackQueryHandler(skip_feedback_callback, pattern="^skip_feedback:"))
+    app.add_handler(CallbackQueryHandler(archived_student_callback, pattern="^archived_student:"))
+    app.add_handler(CallbackQueryHandler(restore_callback, pattern="^restore:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.FileExtension("py"), handle_file))
     print("Bot starting...")
