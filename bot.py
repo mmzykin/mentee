@@ -338,37 +338,72 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not task:
         await query.edit_message_text("Не найден.")
         return
-    desc = escape_html(task["description"][:3500])
-    text = f"📝 <b>{escape_html(task['title'])}</b>\nID: <code>{task_id}</code>\n\n<pre>{desc}</pre>"
+    
+    topic = db.get_topic(task["topic_id"])
+    back_target = f"topic:{task['topic_id']}" if topic else "modules:list"
     
     # Check if timer is running for this task
     timer_info = context.user_data.get("task_timer", {})
-    if timer_info.get("task_id") == task_id:
+    timer_active = timer_info.get("task_id") == task_id
+    
+    # Check if task was opened in "normal" mode (no timer allowed)
+    no_timer_mode = context.user_data.get("no_timer_task") == task_id
+    
+    # If neither timer active nor in no_timer mode, show choice screen first
+    if not timer_active and not no_timer_mode:
+        text = (
+            f"📝 <b>{escape_html(task['title'])}</b>\n"
+            f"ID: <code>{task_id}</code>\n\n"
+            f"<b>Выбери режим:</b>\n\n"
+            f"📖 <b>Обычный</b> — без таймера и бонусов\n\n"
+            f"⏱ <b>На время</b> — реши за 10 мин и получи бонус!\n"
+            f"Можно сделать ставку для ×2 выигрыша"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📖 Открыть задание", callback_data=f"opentask:{task_id}")],
+            [
+                InlineKeyboardButton("⏱ +1⭐", callback_data=f"starttimer:{task_id}:0"),
+                InlineKeyboardButton("🎰 1→2", callback_data=f"starttimer:{task_id}:1"),
+                InlineKeyboardButton("🎰 2→4", callback_data=f"starttimer:{task_id}:2"),
+                InlineKeyboardButton("🎰 3→6", callback_data=f"starttimer:{task_id}:3"),
+            ],
+            [InlineKeyboardButton("« Назад", callback_data=back_target)]
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+        return
+    
+    # Show full task
+    desc = escape_html(task["description"][:3500])
+    text = f"📝 <b>{escape_html(task['title'])}</b>\nID: <code>{task_id}</code>\n\n<pre>{desc}</pre>"
+    
+    keyboard_rows = []
+    
+    if timer_active:
         elapsed = (datetime.now() - timer_info["start_time"]).total_seconds()
         mins, secs = divmod(int(elapsed), 60)
         bet = timer_info.get("bet", 0)
         bet_text = f" (ставка: {bet}⭐)" if bet > 0 else ""
         text += f"\n\n⏱ <b>Таймер: {mins:02d}:{secs:02d}</b>{bet_text}"
+        keyboard_rows.append([InlineKeyboardButton("🔄 Сбросить таймер", callback_data=f"resettimer:{task_id}")])
     
-    topic = db.get_topic(task["topic_id"])
-    back_target = f"topic:{task['topic_id']}" if topic else "modules:list"
-    
-    keyboard_rows = [
-        [InlineKeyboardButton("📤 Отправить", callback_data=f"submit:{task_id}")],
-    ]
-    # Show timer/bet options only if timer not running for this task
-    if timer_info.get("task_id") != task_id:
-        keyboard_rows.insert(0, [
-            InlineKeyboardButton("⏱ +1⭐", callback_data=f"starttimer:{task_id}:0"),
-            InlineKeyboardButton("🎰 1→2⭐", callback_data=f"starttimer:{task_id}:1"),
-            InlineKeyboardButton("🎰 2→4⭐", callback_data=f"starttimer:{task_id}:2"),
-            InlineKeyboardButton("🎰 3→6⭐", callback_data=f"starttimer:{task_id}:3"),
-        ])
-    else:
-        keyboard_rows.insert(0, [InlineKeyboardButton("🔄 Сбросить таймер", callback_data=f"resettimer:{task_id}")])
+    keyboard_rows.append([InlineKeyboardButton("📤 Отправить решение", callback_data=f"submit:{task_id}")])
     keyboard_rows.append([InlineKeyboardButton("« Назад", callback_data=back_target)])
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard_rows), parse_mode="HTML")
+
+
+async def opentask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Open task in normal mode (no timer allowed)"""
+    query = update.callback_query
+    await query.answer()
+    task_id = query.data.split(":")[1]
+    # Mark that this task was opened without timer
+    context.user_data["no_timer_task"] = task_id
+    # Clear any timer for this task
+    context.user_data.pop("task_timer", None)
+    # Show the task
+    query.data = f"task:{task_id}"
+    await task_callback(update, context)
 
 
 async def starttimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -391,6 +426,9 @@ async def starttimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     bet_text = f" (ставка {bet}⭐)" if bet > 0 else ""
     await query.answer(f"⏱ Таймер запущен!{bet_text}")
+    
+    # Clear no_timer mode if was set
+    context.user_data.pop("no_timer_task", None)
     
     context.user_data["task_timer"] = {
         "task_id": task_id,
@@ -1483,6 +1521,7 @@ async def process_submission(update: Update, context: ContextTypes.DEFAULT_TYPE,
             lines = lines[:-1]
         code = "\n".join(lines)
     del context.user_data["pending_task"]
+    context.user_data.pop("no_timer_task", None)
     
     # Check timer and bet
     timer_info = context.user_data.get("task_timer", {})
@@ -1671,6 +1710,7 @@ def main():
     app.add_handler(CallbackQueryHandler(module_callback, pattern="^module:"))
     app.add_handler(CallbackQueryHandler(topic_callback, pattern="^topic:"))
     app.add_handler(CallbackQueryHandler(task_callback, pattern="^task:"))
+    app.add_handler(CallbackQueryHandler(opentask_callback, pattern="^opentask:"))
     app.add_handler(CallbackQueryHandler(starttimer_callback, pattern="^starttimer:"))
     app.add_handler(CallbackQueryHandler(resettimer_callback, pattern="^resettimer:"))
     app.add_handler(CallbackQueryHandler(dailyspin_callback, pattern="^dailyspin"))
