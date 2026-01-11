@@ -335,13 +335,53 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     desc = escape_html(task["description"][:3500])
     text = f"📝 <b>{escape_html(task['title'])}</b>\nID: <code>{task_id}</code>\n\n<pre>{desc}</pre>"
+    
+    # Check if timer is running for this task
+    timer_info = context.user_data.get("task_timer", {})
+    if timer_info.get("task_id") == task_id:
+        elapsed = (datetime.now() - timer_info["start_time"]).total_seconds()
+        mins, secs = divmod(int(elapsed), 60)
+        text += f"\n\n⏱ <b>Таймер: {mins:02d}:{secs:02d}</b>"
+    
     topic = db.get_topic(task["topic_id"])
     back_target = f"topic:{task['topic_id']}" if topic else "modules:list"
-    keyboard = InlineKeyboardMarkup([
+    
+    keyboard_rows = [
         [InlineKeyboardButton("📤 Отправить", callback_data=f"submit:{task_id}")],
-        [InlineKeyboardButton("« Назад", callback_data=back_target)]
-    ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    ]
+    # Show timer button only if timer not running for this task
+    if timer_info.get("task_id") != task_id:
+        keyboard_rows.insert(0, [InlineKeyboardButton("⏱ Начать с таймером (+1⭐ за ≤10 мин)", callback_data=f"starttimer:{task_id}")])
+    else:
+        keyboard_rows.insert(0, [InlineKeyboardButton("🔄 Сбросить таймер", callback_data=f"resettimer:{task_id}")])
+    keyboard_rows.append([InlineKeyboardButton("« Назад", callback_data=back_target)])
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard_rows), parse_mode="HTML")
+
+
+async def starttimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start timer for a task"""
+    query = update.callback_query
+    await query.answer("⏱ Таймер запущен!")
+    task_id = query.data.split(":")[1]
+    context.user_data["task_timer"] = {
+        "task_id": task_id,
+        "start_time": datetime.now()
+    }
+    # Refresh task view to show timer
+    query.data = f"task:{task_id}"
+    await task_callback(update, context)
+
+
+async def resettimer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reset timer for a task"""
+    query = update.callback_query
+    await query.answer("⏱ Таймер сброшен!")
+    task_id = query.data.split(":")[1]
+    context.user_data.pop("task_timer", None)
+    # Refresh task view
+    query.data = f"task:{task_id}"
+    await task_callback(update, context)
 
 
 async def submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -357,8 +397,19 @@ async def submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Не найден.")
         return
     context.user_data["pending_task"] = task_id
+    
+    # Show timer status if running
+    timer_text = ""
+    timer_info = context.user_data.get("task_timer", {})
+    if timer_info.get("task_id") == task_id:
+        elapsed = (datetime.now() - timer_info["start_time"]).total_seconds()
+        mins, secs = divmod(int(elapsed), 60)
+        timer_text = f"\n⏱ Таймер: <b>{mins:02d}:{secs:02d}</b>"
+        if elapsed <= 600:
+            timer_text += " (успеваешь на +1⭐!)"
+    
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"task:{task_id}")]])
-    await query.edit_message_text(f"📤 <b>{escape_html(task['title'])}</b>\n\nОтправь код:", reply_markup=keyboard, parse_mode="HTML")
+    await query.edit_message_text(f"📤 <b>{escape_html(task['title'])}</b>{timer_text}\n\nОтправь код:", reply_markup=keyboard, parse_mode="HTML")
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1311,6 +1362,20 @@ async def process_submission(update: Update, context: ContextTypes.DEFAULT_TYPE,
             lines = lines[:-1]
         code = "\n".join(lines)
     del context.user_data["pending_task"]
+    
+    # Check timer
+    timer_info = context.user_data.get("task_timer", {})
+    timer_bonus = False
+    timer_text = ""
+    if timer_info.get("task_id") == task_id:
+        elapsed = (datetime.now() - timer_info["start_time"]).total_seconds()
+        mins, secs = divmod(int(elapsed), 60)
+        timer_text = f"\n⏱ Время: {mins:02d}:{secs:02d}"
+        if elapsed <= 600:  # 10 minutes
+            timer_bonus = True
+        # Clear timer after submission
+        context.user_data.pop("task_timer", None)
+    
     task = db.get_task(task_id)
     if not task:
         await update.message.reply_text("❌ Задание не найдено.")
@@ -1322,17 +1387,23 @@ async def process_submission(update: Update, context: ContextTypes.DEFAULT_TYPE,
         sub_id = db.add_submission(student["id"], task_id, code, passed, output)
     safe_output = escape_html(output[:1500])
     if passed:
+        bonus_text = ""
+        # Award timer bonus if passed within 10 minutes
+        if timer_bonus and student["id"] != 0:
+            db.add_bonus_points(student["id"], 1)
+            bonus_text = "\n🏃 <b>+1⭐ бонус за скорость!</b>"
+        
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎉 К заданиям", callback_data="modules:list")],
             [InlineKeyboardButton("🏆 Лидерборд", callback_data="menu:leaderboard")]
         ])
-        result = f"✅ <b>Решено!</b> (#{sub_id})\n\n<pre>{safe_output}</pre>"
+        result = f"✅ <b>Решено!</b> (#{sub_id}){timer_text}{bonus_text}\n\n<pre>{safe_output}</pre>"
     else:
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Ещё", callback_data=f"submit:{task_id}")],
             [InlineKeyboardButton("« Задание", callback_data=f"task:{task_id}")]
         ])
-        result = f"❌ <b>Не пройдено</b> (#{sub_id})\n\n<pre>{safe_output}</pre>"
+        result = f"❌ <b>Не пройдено</b> (#{sub_id}){timer_text}\n\n<pre>{safe_output}</pre>"
     await checking.edit_text(result, reply_markup=keyboard, parse_mode="HTML")
 
 
@@ -1445,6 +1516,8 @@ def main():
     app.add_handler(CallbackQueryHandler(module_callback, pattern="^module:"))
     app.add_handler(CallbackQueryHandler(topic_callback, pattern="^topic:"))
     app.add_handler(CallbackQueryHandler(task_callback, pattern="^task:"))
+    app.add_handler(CallbackQueryHandler(starttimer_callback, pattern="^starttimer:"))
+    app.add_handler(CallbackQueryHandler(resettimer_callback, pattern="^resettimer:"))
     app.add_handler(CallbackQueryHandler(submit_callback, pattern="^submit:"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
     app.add_handler(CallbackQueryHandler(create_callback, pattern="^create:"))
