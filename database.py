@@ -44,7 +44,6 @@ def init_db():
                 username TEXT,
                 first_name TEXT,
                 code_used TEXT NOT NULL,
-                bonus_points INTEGER DEFAULT 0,
                 registered_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS modules (
@@ -57,11 +56,9 @@ def init_db():
             CREATE TABLE IF NOT EXISTS topics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 topic_id TEXT UNIQUE NOT NULL,
-                module_id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 order_num INTEGER DEFAULT 0,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (module_id) REFERENCES modules(module_id)
+                created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,10 +77,7 @@ def init_db():
                 code TEXT,
                 passed INTEGER NOT NULL,
                 output TEXT,
-                approved INTEGER DEFAULT 0,
-                bonus_awarded INTEGER DEFAULT 0,
                 submitted_at TEXT NOT NULL,
-                code_deleted_at TEXT,
                 FOREIGN KEY (student_id) REFERENCES students(id),
                 FOREIGN KEY (task_id) REFERENCES tasks(task_id)
             );
@@ -92,25 +86,24 @@ def init_db():
                 user_id INTEGER UNIQUE NOT NULL,
                 added_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_submissions_student ON submissions(student_id);
-            CREATE INDEX IF NOT EXISTS idx_submissions_task ON submissions(task_id);
-            CREATE INDEX IF NOT EXISTS idx_tasks_topic ON tasks(topic_id);
-            CREATE INDEX IF NOT EXISTS idx_topics_module ON topics(module_id);
         """)
-        try:
-            conn.execute("SELECT module_id FROM topics LIMIT 1")
-        except sqlite3.OperationalError:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(topics)").fetchall()}
+        if "module_id" not in cols:
             conn.execute("ALTER TABLE topics ADD COLUMN module_id TEXT DEFAULT '1'")
-        try:
-            conn.execute("SELECT bonus_points FROM students LIMIT 1")
-        except sqlite3.OperationalError:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(students)").fetchall()}
+        if "bonus_points" not in cols:
             conn.execute("ALTER TABLE students ADD COLUMN bonus_points INTEGER DEFAULT 0")
-        try:
-            conn.execute("SELECT approved FROM submissions LIMIT 1")
-        except sqlite3.OperationalError:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(submissions)").fetchall()}
+        if "approved" not in cols:
             conn.execute("ALTER TABLE submissions ADD COLUMN approved INTEGER DEFAULT 0")
+        if "bonus_awarded" not in cols:
             conn.execute("ALTER TABLE submissions ADD COLUMN bonus_awarded INTEGER DEFAULT 0")
+        if "code_deleted_at" not in cols:
             conn.execute("ALTER TABLE submissions ADD COLUMN code_deleted_at TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_student ON submissions(student_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_task ON submissions(task_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_topic ON tasks(topic_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_topics_module ON topics(module_id)")
         existing = conn.execute("SELECT COUNT(*) FROM modules").fetchone()[0]
         if existing == 0:
             conn.execute(
