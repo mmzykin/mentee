@@ -1215,4 +1215,102 @@ def get_quiz_time_remaining(session_id: int) -> int:
         return max(0, int(limit - elapsed))
 
 
+# === MENTOR ASSIGNMENTS ===
+
+def init_mentors():
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS student_mentors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                mentor_user_id INTEGER NOT NULL,
+                assigned_at TEXT NOT NULL,
+                FOREIGN KEY (student_id) REFERENCES students(id),
+                UNIQUE(student_id, mentor_user_id)
+            )
+        """)
+
+
+def assign_mentor(student_id: int, mentor_user_id: int) -> bool:
+    """Assign a mentor to a student"""
+    init_mentors()
+    with get_db() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO student_mentors (student_id, mentor_user_id, assigned_at) VALUES (?, ?, ?)",
+                (student_id, mentor_user_id, datetime.now().isoformat())
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def unassign_mentor(student_id: int, mentor_user_id: int) -> bool:
+    """Remove mentor assignment"""
+    init_mentors()
+    with get_db() as conn:
+        result = conn.execute(
+            "DELETE FROM student_mentors WHERE student_id = ? AND mentor_user_id = ?",
+            (student_id, mentor_user_id)
+        )
+        return result.rowcount > 0
+
+
+def get_student_mentors(student_id: int) -> List[Dict]:
+    """Get all mentors assigned to a student"""
+    init_mentors()
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT sm.*, a.user_id as admin_user_id
+            FROM student_mentors sm
+            JOIN admins a ON sm.mentor_user_id = a.user_id
+            WHERE sm.student_id = ?
+            ORDER BY sm.assigned_at
+        """, (student_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_mentor_students(mentor_user_id: int) -> List[Dict]:
+    """Get all students assigned to a mentor"""
+    init_mentors()
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT s.*, sm.assigned_at as mentor_assigned_at
+            FROM student_mentors sm
+            JOIN students s ON sm.student_id = s.id
+            WHERE sm.mentor_user_id = ?
+            ORDER BY sm.assigned_at DESC
+        """, (mentor_user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def is_mentor_of(mentor_user_id: int, student_id: int) -> bool:
+    """Check if admin is mentor of specific student"""
+    init_mentors()
+    with get_db() as conn:
+        result = conn.execute(
+            "SELECT 1 FROM student_mentors WHERE student_id = ? AND mentor_user_id = ?",
+            (student_id, mentor_user_id)
+        ).fetchone()
+        return result is not None
+
+
+def get_student_mentor_ids(student_id: int) -> List[int]:
+    """Get list of mentor user_ids for a student (for notifications)"""
+    init_mentors()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT mentor_user_id FROM student_mentors WHERE student_id = ?",
+            (student_id,)
+        ).fetchall()
+        return [r['mentor_user_id'] for r in rows]
+
+
+def get_all_admins() -> List[Dict]:
+    """Get all admins for mentor selection"""
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM admins ORDER BY added_at").fetchall()
+        return [dict(r) for r in rows]
+
+
 init_db()

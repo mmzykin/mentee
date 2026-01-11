@@ -53,8 +53,16 @@ def main_menu_keyboard(is_admin=False, has_assigned=False, can_spin=False, unrea
     return InlineKeyboardMarkup(keyboard)
 
 
-def admin_menu_keyboard():
+def admin_menu_keyboard(admin_user_id=None):
+    my_students_count = 0
+    if admin_user_id:
+        my_students = db.get_mentor_students(admin_user_id)
+        my_students_count = len(my_students)
+    
+    my_students_text = f"🎓 Мои ученики ({my_students_count})" if my_students_count else "🎓 Мои ученики"
+    
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(my_students_text, callback_data="admin:mystudents")],
         [
             InlineKeyboardButton("📦 Модули", callback_data="admin:modules"),
             InlineKeyboardButton("📚 Темы", callback_data="admin:topics"),
@@ -318,6 +326,35 @@ async def notify_student(context: ContextTypes.DEFAULT_TYPE, student_user_id: in
         return False
 
 
+async def notify_mentors(context: ContextTypes.DEFAULT_TYPE, student_id: int, message: str, 
+                         keyboard=None, fallback_to_all=True):
+    """
+    Send notification to student's assigned mentors.
+    If no mentors assigned and fallback_to_all=True, notify all admins.
+    Returns number of successful notifications.
+    """
+    mentor_ids = db.get_student_mentor_ids(student_id)
+    
+    # Fallback to all admins if no mentors assigned
+    if not mentor_ids and fallback_to_all:
+        admins = db.get_all_admins()
+        mentor_ids = [a['user_id'] for a in admins]
+    
+    sent = 0
+    for mentor_id in mentor_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=mentor_id, 
+                text=message, 
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+            sent += 1
+        except Exception as e:
+            print(f"Failed to notify mentor {mentor_id}: {e}")
+    return sent
+
+
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await safe_answer(query)
@@ -406,7 +443,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📝 Заданий: <b>{len(tasks)}</b>\n"
             f"👥 Студентов: <b>{len(students)}</b>"
         )
-        await query.edit_message_text(text, reply_markup=admin_menu_keyboard(), parse_mode="HTML")
+        await query.edit_message_text(text, reply_markup=admin_menu_keyboard(user.id), parse_mode="HTML")
 
 
 async def modules_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -736,7 +773,28 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     action = query.data.split(":")[1]
     
-    if action == "modules":
+    if action == "mystudents":
+        admin_id = update.effective_user.id
+        my_students = db.get_mentor_students(admin_id)
+        
+        if not my_students:
+            text = "🎓 <b>Мои ученики</b>\n\n<i>У вас нет назначенных учеников.</i>\n\nЧтобы назначить себя ментором ученика, откройте его профиль в разделе «Студенты» и нажмите «Менторы»."
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("« Админ", callback_data="menu:admin")]])
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+            return
+        
+        text = f"🎓 <b>Мои ученики ({len(my_students)})</b>\n\n"
+        keyboard = []
+        for s in my_students:
+            name = s.get("first_name") or s.get("username") or "?"
+            stats = db.get_student_stats(s["id"])
+            btn_text = f"👤 {name} | ✅{stats['solved_tasks']} ⭐{stats['bonus_points']}"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"student:{s['user_id']}")])
+        
+        keyboard.append([InlineKeyboardButton("« Админ", callback_data="menu:admin")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    
+    elif action == "modules":
         modules = db.get_modules()
         text = "📦 <b>Модули</b>\n\n"
         if modules:
@@ -1079,6 +1137,18 @@ async def student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = f"@{student.get('username')}" if student.get("username") else "нет username"
     stats = db.get_student_stats(student["id"])
     assigned = db.get_assigned_tasks(student["id"])
+    mentors = db.get_student_mentors(student["id"])
+    
+    mentors_text = ""
+    if mentors:
+        mentor_names = []
+        for m in mentors:
+            # Try to get mentor info from context bot
+            mentor_names.append(f"ID:{m['mentor_user_id']}")
+        mentors_text = f"\n👨‍🏫 Менторы: {len(mentors)}"
+    else:
+        mentors_text = "\n👨‍🏫 Менторы: <i>не назначены</i>"
+    
     text = (
         f"📋 <b>{name}</b>\n"
         f"👤 {username}\n"
@@ -1086,14 +1156,14 @@ async def student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ {stats['solved_tasks']}/{stats['total_tasks']}\n"
         f"⭐ Бонусов: {stats['bonus_points']}\n"
         f"📌 Назначено: {len(assigned)}"
+        f"{mentors_text}"
     )
     keyboard = [
         [InlineKeyboardButton("📋 Последние 10 попыток", callback_data=f"recent:{student['id']}")],
         [InlineKeyboardButton("📝 По заданиям", callback_data=f"bytask:{student['id']}")],
         [InlineKeyboardButton("📌 Назначить задание", callback_data=f"assign:{student['id']}")],
-        [
-            InlineKeyboardButton("✏️ Изменить имя", callback_data=f"editname:{student['id']}"),
-        ],
+        [InlineKeyboardButton("👨‍🏫 Менторы", callback_data=f"mentors:{student['id']}")],
+        [InlineKeyboardButton("✏️ Изменить имя", callback_data=f"editname:{student['id']}")],
         [InlineKeyboardButton("🎉 Устроен на работу", callback_data=f"hired:{student['id']}")],
         [InlineKeyboardButton("« Студенты", callback_data="admin:students")]
     ]
@@ -1616,6 +1686,96 @@ async def editname_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Отправь новое имя для студента:",
         reply_markup=keyboard, parse_mode="HTML"
     )
+
+
+async def mentors_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manage mentors for a student"""
+    query = update.callback_query
+    await safe_answer(query)
+    if not db.is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔")
+        return
+    
+    student_id = int(query.data.split(":")[1])
+    student = db.get_student_by_id(student_id)
+    if not student:
+        await query.edit_message_text("Не найден.")
+        return
+    
+    name = escape_html(student.get("first_name") or student.get("username") or "?")
+    mentors = db.get_student_mentors(student_id)
+    admins = db.get_all_admins()
+    
+    text = f"👨‍🏫 <b>Менторы студента {name}</b>\n\n"
+    
+    if mentors:
+        text += "<b>Назначенные менторы:</b>\n"
+        for m in mentors:
+            text += f"• ID: <code>{m['mentor_user_id']}</code>\n"
+    else:
+        text += "<i>Менторы не назначены</i>\n"
+    
+    text += "\n<b>Выбери ментора:</b>"
+    
+    keyboard = []
+    for admin in admins:
+        is_mentor = any(m['mentor_user_id'] == admin['user_id'] for m in mentors)
+        emoji = "✅" if is_mentor else "➕"
+        action = "unmentor" if is_mentor else "addmentor"
+        keyboard.append([InlineKeyboardButton(
+            f"{emoji} ID:{admin['user_id']}", 
+            callback_data=f"{action}:{student_id}:{admin['user_id']}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton("« Назад", callback_data=f"student:{student['user_id']}")])
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def addmentor_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add mentor to student"""
+    query = update.callback_query
+    await safe_answer(query)
+    if not db.is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔")
+        return
+    
+    parts = query.data.split(":")
+    student_id = int(parts[1])
+    mentor_user_id = int(parts[2])
+    
+    if db.assign_mentor(student_id, mentor_user_id):
+        await safe_answer(query, "✅ Ментор назначен!", show_alert=True)
+    else:
+        await safe_answer(query, "Уже назначен", show_alert=True)
+    
+    # Refresh mentors view
+    student = db.get_student_by_id(student_id)
+    if student:
+        query.data = f"mentors:{student_id}"
+        await mentors_callback(update, context)
+
+
+async def unmentor_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove mentor from student"""
+    query = update.callback_query
+    await safe_answer(query)
+    if not db.is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔")
+        return
+    
+    parts = query.data.split(":")
+    student_id = int(parts[1])
+    mentor_user_id = int(parts[2])
+    
+    if db.unassign_mentor(student_id, mentor_user_id):
+        await safe_answer(query, "❌ Ментор удалён", show_alert=True)
+    
+    # Refresh mentors view
+    student = db.get_student_by_id(student_id)
+    if student:
+        query.data = f"mentors:{student_id}"
+        await mentors_callback(update, context)
 
 
 async def hired_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2497,10 +2657,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         del context.user_data["creating"]
         
-        # Notify all admins
-        with db.get_db() as conn:
-            admins = conn.execute("SELECT user_id FROM admins").fetchall()
-        
+        # Notify assigned mentors (or all admins as fallback)
         student_name = student.get('first_name') or student.get('username') or '?'
         dt_str = lines[1].strip()
         
@@ -2509,20 +2666,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("❌ Отклонить", callback_data=f"meeting_reject:{meeting_id}")]
         ])
         
-        for admin in admins:
-            try:
-                await context.bot.send_message(
-                    admin['user_id'],
-                    f"🔔 <b>Запрос на встречу!</b>\n\n"
-                    f"👤 От: <b>{escape_html(student_name)}</b>\n"
-                    f"📋 Тема: <b>{escape_html(title)}</b>\n"
-                    f"🕐 Время: {dt_str}\n"
-                    f"⏱ {duration} мин",
-                    parse_mode="HTML",
-                    reply_markup=keyboard
-                )
-            except Exception:
-                pass
+        await notify_mentors(
+            context, student['id'],
+            f"🔔 <b>Запрос на встречу!</b>\n\n"
+            f"👤 От: <b>{escape_html(student_name)}</b>\n"
+            f"📋 Тема: <b>{escape_html(title)}</b>\n"
+            f"🕐 Время: {dt_str}\n"
+            f"⏱ {duration} мин",
+            keyboard=keyboard
+        )
         
         await update.message.reply_text(
             f"✅ Запрос отправлен ментору!\n\n"
@@ -2658,7 +2810,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topics = db.get_topics()
     tasks = db.get_all_tasks()
     text = f"👑 <b>Админ</b>\n\n📦 Модулей: {len(modules)}\n📚 Тем: {len(topics)}\n📝 Заданий: {len(tasks)}"
-    await update.message.reply_text(text, reply_markup=admin_menu_keyboard(), parse_mode="HTML")
+    await update.message.reply_text(text, reply_markup=admin_menu_keyboard(update.effective_user.id), parse_mode="HTML")
 
 
 @require_admin
@@ -2848,6 +3000,9 @@ def main():
     app.add_handler(CallbackQueryHandler(mycode_callback, pattern="^mycode:"))
     app.add_handler(CallbackQueryHandler(myassigned_callback, pattern="^myassigned:"))
     app.add_handler(CallbackQueryHandler(editname_callback, pattern="^editname:"))
+    app.add_handler(CallbackQueryHandler(mentors_callback, pattern="^mentors:"))
+    app.add_handler(CallbackQueryHandler(addmentor_callback, pattern="^addmentor:"))
+    app.add_handler(CallbackQueryHandler(unmentor_callback, pattern="^unmentor:"))
     app.add_handler(CallbackQueryHandler(hired_callback, pattern="^hired:"))
     app.add_handler(CallbackQueryHandler(archive_callback, pattern="^archive:"))
     app.add_handler(CallbackQueryHandler(skip_feedback_callback, pattern="^skip_feedback:"))
