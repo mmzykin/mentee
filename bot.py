@@ -327,15 +327,15 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not task:
         await query.edit_message_text("Не найден.")
         return
-    desc = task["description"][:3500]
-    text = f"📝 <b>{escape_html(task['title'])}</b>\nID: <code>{task_id}</code>\n\n{desc}"
+    desc = escape_html(task["description"][:3500])
+    text = f"📝 <b>{escape_html(task['title'])}</b>\nID: <code>{task_id}</code>\n\n<pre>{desc}</pre>"
     topic = db.get_topic(task["topic_id"])
     back_target = f"topic:{task['topic_id']}" if topic else "modules:list"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Отправить", callback_data=f"submit:{task_id}")],
         [InlineKeyboardButton("« Назад", callback_data=back_target)]
     ])
-    await query.edit_message_text(text, reply_markup=keyboard)
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -814,17 +814,24 @@ async def toggleassign_callback(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         db.assign_task(student_id, task_id)
         await query.answer("Назначено!")
-        # Notify student about new assignment
+        # Notify student about new assignment with direct button
         student = db.get_student_by_id(student_id)
         task = db.get_task(task_id)
         if student and task:
-            await notify_student(
-                context, student["user_id"],
-                f"📌 <b>Вам назначено новое задание!</b>\n\n"
-                f"<b>{escape_html(task['title'])}</b>\n"
-                f"ID: <code>{task_id}</code>\n\n"
-                f"Откройте 📚 Задания для просмотра."
-            )
+            try:
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📝 Открыть задание", callback_data=f"task:{task_id}")]
+                ])
+                await context.bot.send_message(
+                    chat_id=student["user_id"],
+                    text=f"📌 <b>Вам назначено новое задание!</b>\n\n"
+                         f"<b>{escape_html(task['title'])}</b>\n"
+                         f"ID: <code>{task_id}</code>",
+                    parse_mode="HTML",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                print(f"Failed to notify student {student['user_id']}: {e}")
     task = db.get_task(task_id)
     if task:
         await assigntopic_callback(update, context)
