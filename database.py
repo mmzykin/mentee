@@ -108,6 +108,13 @@ def init_db():
             conn.execute("ALTER TABLE students ADD COLUMN archive_reason TEXT")
         if "archive_feedback" not in cols:
             conn.execute("ALTER TABLE students ADD COLUMN archive_feedback TEXT")
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "language" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN language TEXT DEFAULT 'python'")
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(modules)").fetchall()}
+        if "language" not in cols:
+            conn.execute("ALTER TABLE modules ADD COLUMN language TEXT DEFAULT 'python'")
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(students)").fetchall()}
         if "last_daily_spin" not in cols:
             conn.execute("ALTER TABLE students ADD COLUMN last_daily_spin TEXT")
         if "solve_streak" not in cols:
@@ -238,10 +245,10 @@ def add_bonus_points(student_id: int, points: int) -> bool:
         return True
 
 
-def add_module(module_id: str, name: str, order_num: int = 0) -> bool:
+def add_module(module_id: str, name: str, order_num: int = 0, language: str = "python") -> bool:
     with get_db() as conn:
         try:
-            conn.execute("INSERT INTO modules (module_id, name, order_num, created_at) VALUES (?, ?, ?, ?)", (module_id, name, order_num, datetime.now().isoformat()))
+            conn.execute("INSERT INTO modules (module_id, name, order_num, language, created_at) VALUES (?, ?, ?, ?, ?)", (module_id, name, order_num, language, datetime.now().isoformat()))
             return True
         except sqlite3.IntegrityError:
             return False
@@ -304,10 +311,10 @@ def delete_topic(topic_id: str) -> bool:
         return result.rowcount > 0
 
 
-def add_task(task_id: str, topic_id: str, title: str, description: str, test_code: str) -> bool:
+def add_task(task_id: str, topic_id: str, title: str, description: str, test_code: str, language: str = "python") -> bool:
     with get_db() as conn:
         try:
-            conn.execute("INSERT INTO tasks (task_id, topic_id, title, description, test_code, created_at) VALUES (?, ?, ?, ?, ?, ?)", (task_id, topic_id, title, description, test_code, datetime.now().isoformat()))
+            conn.execute("INSERT INTO tasks (task_id, topic_id, title, description, test_code, language, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (task_id, topic_id, title, description, test_code, language, datetime.now().isoformat()))
             return True
         except sqlite3.IntegrityError:
             return False

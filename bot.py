@@ -83,6 +83,7 @@ def parse_task_format(text: str) -> Optional[dict]:
         topic_match = re.search(r"TOPIC:\s*(\S+)", text)
         task_id_match = re.search(r"TASK_ID:\s*(\S+)", text)
         title_match = re.search(r"TITLE:\s*(.+?)(?:\n|---)", text)
+        lang_match = re.search(r"LANGUAGE:\s*(\S+)", text)
         if not all([topic_match, task_id_match, title_match]):
             return None
         desc_match = re.search(r"---DESCRIPTION---\s*\n(.*?)---TESTS---", text, re.DOTALL)
@@ -95,12 +96,13 @@ def parse_task_format(text: str) -> Optional[dict]:
             "title": title_match.group(1).strip(),
             "description": desc_match.group(1).strip(),
             "test_code": tests_match.group(1).strip(),
+            "language": lang_match.group(1).strip().lower() if lang_match else "python",
         }
     except:
         return None
 
 
-def run_code_with_tests(code: str, test_code: str) -> tuple[bool, str]:
+def run_python_code_with_tests(code: str, test_code: str) -> tuple[bool, str]:
     full_code = code + "\n\n" + test_code
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
         f.write(full_code)
@@ -123,6 +125,66 @@ def run_code_with_tests(code: str, test_code: str) -> tuple[bool, str]:
             os.unlink(temp_path)
         except:
             pass
+
+
+def run_go_code_with_tests(code: str, test_code: str) -> tuple[bool, str]:
+    """Run Go code with tests"""
+    # Create temp directory for Go module
+    temp_dir = tempfile.mkdtemp()
+    main_path = os.path.join(temp_dir, "main.go")
+    test_path = os.path.join(temp_dir, "main_test.go")
+    
+    try:
+        # Write main code
+        with open(main_path, "w", encoding="utf-8") as f:
+            f.write(code)
+        
+        # Write test code
+        with open(test_path, "w", encoding="utf-8") as f:
+            f.write(test_code)
+        
+        # Initialize go module
+        subprocess.run(
+            ["go", "mod", "init", "solution"],
+            cwd=temp_dir, capture_output=True, timeout=5
+        )
+        
+        # Run tests
+        result = subprocess.run(
+            ["go", "test", "-v", "."],
+            cwd=temp_dir, capture_output=True, text=True, timeout=EXEC_TIMEOUT
+        )
+        
+        output = result.stdout + result.stderr
+        # Go tests pass if return code is 0 and contains PASS
+        passed = result.returncode == 0 and ("PASS" in output or "✅" in output)
+        
+        # Add checkmark for consistency
+        if passed and "✅" not in output:
+            output = "✅ Все тесты пройдены!\n\n" + output
+        
+        return passed, output.strip()
+    except subprocess.TimeoutExpired:
+        return False, f"⏰ Timeout: {EXEC_TIMEOUT} сек"
+    except FileNotFoundError:
+        return False, "❌ Go не установлен на сервере"
+    except Exception as e:
+        return False, f"❌ Ошибка: {e}"
+    finally:
+        # Cleanup
+        import shutil
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass
+
+
+def run_code_with_tests(code: str, test_code: str, language: str = "python") -> tuple[bool, str]:
+    """Universal runner - dispatches to language-specific runner"""
+    if language == "go":
+        return run_go_code_with_tests(code, test_code)
+    else:
+        return run_python_code_with_tests(code, test_code)
 
 
 def require_admin(func):
@@ -311,10 +373,11 @@ async def modules_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for task in db.get_tasks_by_topic(t["topic_id"]):
                     if db.has_solved(student_id, task["task_id"]):
                         solved += 1
-        btn = f"📦 {m['name']} ({solved}/{total})"
+        lang_emoji = "🐹" if m.get("language") == "go" else "🐍"
+        btn = f"{lang_emoji} {m['name']} ({solved}/{total})"
         keyboard.append([InlineKeyboardButton(btn, callback_data=f"module:{m['module_id']}")])
     keyboard.append([InlineKeyboardButton("« Меню", callback_data="menu:main")])
-    await query.edit_message_text("📦 <b>Модули</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await query.edit_message_text("📚 <b>Модули</b>\n\n🐍 Python  🐹 Go", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
 async def module_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -381,9 +444,11 @@ async def show_task_view(query, context, task_id: str):
     
     # If neither timer active nor in no_timer mode, show choice screen first
     if not timer_active and not no_timer_mode:
+        lang = task.get("language", "python")
+        lang_label = "🐹 Go" if lang == "go" else "🐍 Python"
         text = (
             f"📝 <b>{escape_html(task['title'])}</b>\n"
-            f"ID: <code>{task_id}</code>\n\n"
+            f"ID: <code>{task_id}</code> • {lang_label}\n\n"
             f"<b>Выбери режим:</b>\n\n"
             f"📖 <b>Обычный</b> — без таймера и бонусов\n\n"
             f"⏱ <b>На время</b> — реши за 10 мин и получи бонус!\n"
@@ -403,8 +468,10 @@ async def show_task_view(query, context, task_id: str):
         return
     
     # Show full task
+    lang = task.get("language", "python")
+    lang_label = "🐹 Go" if lang == "go" else "🐍 Python"
     desc = escape_html(task["description"][:3500])
-    text = f"📝 <b>{escape_html(task['title'])}</b>\nID: <code>{task_id}</code>\n\n<pre>{desc}</pre>"
+    text = f"📝 <b>{escape_html(task['title'])}</b>\nID: <code>{task_id}</code> • {lang_label}\n\n<pre>{desc}</pre>"
     
     keyboard_rows = []
     
@@ -734,7 +801,13 @@ async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "module":
         context.user_data["creating"] = "module"
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:modules")]])
-        await query.edit_message_text("📦 <b>Новый модуль</b>\n\nОтправь ID и название:\n<code>2 ООП</code>", reply_markup=keyboard, parse_mode="HTML")
+        await query.edit_message_text(
+            "📦 <b>Новый модуль</b>\n\n"
+            "Отправь ID, название и язык (опционально):\n"
+            "<code>2 ООП</code> — Python по умолчанию\n"
+            "<code>go1 Основы Go go</code> — для Go модуля",
+            reply_markup=keyboard, parse_mode="HTML"
+        )
     
     elif action == "topic_select":
         modules = db.get_modules()
@@ -1497,13 +1570,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if db.is_admin(user.id):
         if context.user_data.get("creating") == "module":
-            parts = text.split(maxsplit=1)
+            parts = text.split()
             if len(parts) < 2:
-                await update.message.reply_text("Формат: <code>id Название</code>", parse_mode="HTML")
+                await update.message.reply_text("Формат: <code>id Название [go]</code>", parse_mode="HTML")
                 return
-            if db.add_module(parts[0], parts[1], len(db.get_modules()) + 1):
+            module_id = parts[0]
+            # Check if last part is language (only if 3+ parts to avoid "1 go" being empty name)
+            if len(parts) >= 3 and parts[-1].lower() in ("go", "python", "py"):
+                lang = "go" if parts[-1].lower() == "go" else "python"
+                name = " ".join(parts[1:-1])
+            else:
+                lang = "python"
+                name = " ".join(parts[1:])
+            if db.add_module(module_id, name, len(db.get_modules()) + 1, lang):
                 del context.user_data["creating"]
-                await update.message.reply_text(f"✅ Модуль создан!", reply_markup=back_to_admin_keyboard())
+                lang_emoji = "🐹" if lang == "go" else "🐍"
+                await update.message.reply_text(f"✅ Модуль создан! {lang_emoji}", reply_markup=back_to_admin_keyboard())
             else:
                 await update.message.reply_text("❌ ID занят.")
             return
@@ -1531,9 +1613,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not topic:
                 await update.message.reply_text(f"❌ Тема не найдена.", parse_mode="HTML")
                 return
-            if db.add_task(parsed["task_id"], parsed["topic_id"], parsed["title"], parsed["description"], parsed["test_code"]):
+            lang = parsed.get("language", "python")
+            if db.add_task(parsed["task_id"], parsed["topic_id"], parsed["title"], parsed["description"], parsed["test_code"], lang):
                 del context.user_data["creating"]
-                await update.message.reply_text(f"✅ Задание создано!", reply_markup=back_to_admin_keyboard())
+                lang_name = "Go 🐹" if lang == "go" else "Python 🐍"
+                await update.message.reply_text(f"✅ Задание создано! ({lang_name})", reply_markup=back_to_admin_keyboard())
             else:
                 await update.message.reply_text("❌ ID занят.")
             return
@@ -1634,8 +1718,10 @@ async def process_submission(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if not task:
         await update.message.reply_text("❌ Задание не найдено.")
         return
-    checking = await update.message.reply_text("⏳ Проверяю...")
-    passed, output = run_code_with_tests(code, task["test_code"])
+    lang = task.get("language", "python")
+    lang_emoji = "🐹" if lang == "go" else "🐍"
+    checking = await update.message.reply_text(f"⏳ Проверяю {lang_emoji}...")
+    passed, output = run_code_with_tests(code, task["test_code"], lang)
     sub_id = 0
     if student["id"] != 0:
         sub_id = db.add_submission(student["id"], task_id, code, passed, output)
@@ -1754,9 +1840,10 @@ async def topics_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topics = db.get_topics_by_module(m["module_id"])
         total = sum(len(db.get_tasks_by_topic(t["topic_id"])) for t in topics)
         solved = sum(1 for t in topics for task in db.get_tasks_by_topic(t["topic_id"]) if student_id and db.has_solved(student_id, task["task_id"]))
-        keyboard.append([InlineKeyboardButton(f"📦 {m['name']} ({solved}/{total})", callback_data=f"module:{m['module_id']}")])
+        lang_emoji = "🐹" if m.get("language") == "go" else "🐍"
+        keyboard.append([InlineKeyboardButton(f"{lang_emoji} {m['name']} ({solved}/{total})", callback_data=f"module:{m['module_id']}")])
     keyboard.append([InlineKeyboardButton("« Меню", callback_data="menu:main")])
-    await update.message.reply_text("📦 <b>Модули</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await update.message.reply_text("📚 <b>Модули</b>\n\n🐍 Python  🐹 Go", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
 @require_registered
