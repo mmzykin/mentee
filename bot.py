@@ -526,6 +526,9 @@ async def student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
+    context.user_data.pop("editing_student_name", None)
+    context.user_data.pop("archiving_student", None)
+    context.user_data.pop("archive_reason", None)
     user_id = int(query.data.split(":")[1])
     student = db.get_student(user_id)
     if not student:

@@ -102,6 +102,12 @@ def init_db():
         cols = {row[1] for row in conn.execute("PRAGMA table_info(students)").fetchall()}
         if "bonus_points" not in cols:
             conn.execute("ALTER TABLE students ADD COLUMN bonus_points INTEGER DEFAULT 0")
+        if "archived_at" not in cols:
+            conn.execute("ALTER TABLE students ADD COLUMN archived_at TEXT")
+        if "archive_reason" not in cols:
+            conn.execute("ALTER TABLE students ADD COLUMN archive_reason TEXT")
+        if "archive_feedback" not in cols:
+            conn.execute("ALTER TABLE students ADD COLUMN archive_feedback TEXT")
         cols = {row[1] for row in conn.execute("PRAGMA table_info(submissions)").fetchall()}
         if "approved" not in cols:
             conn.execute("ALTER TABLE submissions ADD COLUMN approved INTEGER DEFAULT 0")
