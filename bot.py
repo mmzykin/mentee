@@ -498,7 +498,8 @@ async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not db.is_admin(update.effective_user.id):
         await query.edit_message_text("⛔")
         return
-    action = query.data.split(":")[1]
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
     
     if action == "module":
         context.user_data["creating"] = "module"
@@ -520,8 +521,8 @@ async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("« Назад", callback_data="admin:topics")])
         await query.edit_message_text("Выбери модуль для темы:", reply_markup=InlineKeyboardMarkup(keyboard))
     
-    elif action.startswith("topic:"):
-        module_id = action.split(":")[1]
+    elif action == "topic" and len(parts) > 2:
+        module_id = parts[2]
         module = db.get_module(module_id)
         if not module:
             await query.edit_message_text("Модуль не найден.")
