@@ -807,6 +807,13 @@ def init_meetings():
                 FOREIGN KEY (student_id) REFERENCES students(id)
             )
         """)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(meetings)").fetchall()}
+        if "time_slot_start" not in cols:
+            conn.execute("ALTER TABLE meetings ADD COLUMN time_slot_start TEXT")
+        if "time_slot_end" not in cols:
+            conn.execute("ALTER TABLE meetings ADD COLUMN time_slot_end TEXT")
+        if "confirmed_time" not in cols:
+            conn.execute("ALTER TABLE meetings ADD COLUMN confirmed_time TEXT")
 
 
 def create_meeting(student_id: Optional[int], title: str, meeting_link: str, 
@@ -910,6 +917,56 @@ def mark_reminder_sent(meeting_id: int, reminder_type: str):
             conn.execute("UPDATE meetings SET reminder_24h_sent = 1 WHERE id = ?", (meeting_id,))
         else:
             conn.execute("UPDATE meetings SET reminder_1h_sent = 1 WHERE id = ?", (meeting_id,))
+
+
+def create_meeting_with_slot(student_id: int, title: str, date: str, 
+                              time_slot_start: str, time_slot_end: str,
+                              duration_minutes: int, created_by: int) -> int:
+    """Create meeting request with flexible time slot (e.g., 16:00-21:00)"""
+    init_meetings()
+    with get_db() as conn:
+        scheduled_at = f"{date}T{time_slot_start}:00"
+        cursor = conn.execute(
+            """INSERT INTO meetings (student_id, title, meeting_link, scheduled_at, 
+               duration_minutes, status, created_by, created_at, 
+               time_slot_start, time_slot_end) 
+               VALUES (?, ?, '', ?, ?, 'slot_requested', ?, ?, ?, ?)""",
+            (student_id, title, scheduled_at, duration_minutes, 
+             created_by, now_msk().isoformat(), 
+             f"{date}T{time_slot_start}:00", f"{date}T{time_slot_end}:00")
+        )
+        return cursor.lastrowid
+
+
+def confirm_meeting_time(meeting_id: int, confirmed_time: str, meeting_link: str) -> bool:
+    """Mentor confirms specific time within the slot"""
+    with get_db() as conn:
+        conn.execute(
+            """UPDATE meetings 
+               SET confirmed_time = ?, scheduled_at = ?, meeting_link = ?, status = 'confirmed'
+               WHERE id = ?""",
+            (confirmed_time, confirmed_time, meeting_link, meeting_id)
+        )
+        return True
+
+
+def get_meeting_slot_times(meeting_id: int) -> List[str]:
+    """Generate list of possible times within a slot (every 30 min)"""
+    meeting = get_meeting(meeting_id)
+    if not meeting or not meeting.get('time_slot_start') or not meeting.get('time_slot_end'):
+        return []
+    
+    start = datetime.fromisoformat(meeting['time_slot_start'])
+    end = datetime.fromisoformat(meeting['time_slot_end'])
+    duration = meeting.get('duration_minutes', 30)
+    
+    times = []
+    current = start
+    while current <= end - timedelta(minutes=duration):
+        times.append(current.strftime("%H:%M"))
+        current += timedelta(minutes=30)
+    
+    return times
 
 
 # === INTERVIEW QUESTIONS ===
@@ -1090,7 +1147,7 @@ def start_quiz_session(student_id: int, questions: List[Dict],
             """INSERT INTO quiz_sessions 
                (student_id, quiz_type, total_questions, time_limit_seconds, started_at) 
                VALUES (?, ?, ?, ?, ?)""",
-            (student_id, quiz_type, len(questions), time_limit_seconds, datetime.now().isoformat())
+            (student_id, quiz_type, len(questions), time_limit_seconds, now_msk().isoformat())
         )
         session_id = cursor.lastrowid
         

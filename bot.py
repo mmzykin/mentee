@@ -956,7 +956,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += "<i>Нет запланированных встреч</i>\n"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Назначить встречу", callback_data="create:meeting")],
-            [InlineKeyboardButton("📋 Все встречи", callback_data="meetings:all")],
+            [
+                InlineKeyboardButton("📋 Все встречи", callback_data="meetings:all"),
+                InlineKeyboardButton("🔗 Ссылки", callback_data="meetings:links"),
+            ],
             [InlineKeyboardButton("« Админ", callback_data="menu:admin")]
         ])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -1073,13 +1076,12 @@ async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Отправь данные в формате:\n"
             "<code>Пробное собеседование\n"
             "https://telemost.yandex.ru/j/xxx\n"
-            "2026-01-15 18:00\n"
-            "30</code>\n\n"
+            "2026-01-15 18:00</code>\n\n"
             "Строки:\n"
             "1. Название встречи\n"
             "2. Ссылка на Яндекс.Телемост\n"
-            "3. Дата и время (YYYY-MM-DD HH:MM)\n"
-            "4. Длительность в минутах",
+            "3. Дата и время (YYYY-MM-DD HH:MM)\n\n"
+            "<i>Длительность выберешь на следующем шаге</i>",
             reply_markup=keyboard, parse_mode="HTML"
         )
     
@@ -2021,10 +2023,24 @@ async def meetings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if meetings:
             for m in meetings:
-                dt = to_msk_str(m['scheduled_at'])
-                status_emoji = {'pending': '⏳', 'confirmed': '✅', 'cancelled': '❌', 'requested': '🔔'}.get(m['status'], '⏳')
+                status_emoji = {'pending': '⏳', 'confirmed': '✅', 'cancelled': '❌', 'requested': '🔔', 'slot_requested': '🕐'}.get(m['status'], '⏳')
                 text += f"{status_emoji} <b>{escape_html(m['title'])}</b>\n"
-                text += f"   🕐 {dt} ({m['duration_minutes']} мин)\n"
+                
+                # Show time slot or confirmed time
+                if m['status'] == 'slot_requested' and m.get('time_slot_start') and m.get('time_slot_end'):
+                    date_str = m['time_slot_start'][:10]
+                    slot_start = m['time_slot_start'][11:16]
+                    slot_end = m['time_slot_end'][11:16]
+                    text += f"   📅 {date_str}\n"
+                    text += f"   🕐 Интервал: {slot_start} — {slot_end} ({m['duration_minutes']} мин)\n"
+                    text += f"   <i>Ожидание выбора времени ментором</i>\n"
+                elif m.get('confirmed_time'):
+                    dt = to_msk_str(m['confirmed_time'])
+                    text += f"   🕐 {dt} ({m['duration_minutes']} мин)\n"
+                else:
+                    dt = to_msk_str(m['scheduled_at'])
+                    text += f"   🕐 {dt} ({m['duration_minutes']} мин)\n"
+                
                 if m['meeting_link']:
                     text += f"   🔗 <a href='{m['meeting_link']}'>Открыть Телемост</a>\n"
                 text += "\n"
@@ -2047,12 +2063,15 @@ async def meetings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📅 <b>Запрос встречи с ментором</b>\n\n"
             "Отправь в формате:\n"
             "<code>Тема встречи\n"
-            "2026-01-20 18:00\n"
+            "2026-01-20\n"
+            "16:00-21:00\n"
             "30</code>\n\n"
             "Строки:\n"
             "1. Тема/цель встречи\n"
-            "2. Желаемая дата и время (YYYY-MM-DD HH:MM)\n"
-            "3. Длительность в минутах",
+            "2. Дата (YYYY-MM-DD)\n"
+            "3. Временной интервал (HH:MM-HH:MM) — когда вам удобно\n"
+            "4. Длительность в минутах\n\n"
+            "💡 <i>Пример: могу завтра с 16:00 до 21:00 — ментор выберет удобное ему время</i>",
             reply_markup=keyboard, parse_mode="HTML"
         )
     
@@ -2064,15 +2083,49 @@ async def meetings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for m in meetings[:15]:
                 student_obj = db.get_student_by_id(m['student_id']) if m['student_id'] else None
                 student_name = (student_obj.get('first_name') or student_obj.get('username') or '?') if student_obj else '—'
-                dt = to_msk_str(m['scheduled_at'])
-                status_emoji = {'pending': '⏳', 'confirmed': '✅', 'cancelled': '❌'}.get(m['status'], '⏳')
+                status_emoji = {'pending': '⏳', 'confirmed': '✅', 'cancelled': '❌', 'slot_requested': '🕐'}.get(m['status'], '⏳')
                 text += f"{status_emoji} <b>{escape_html(m['title'])}</b>\n"
-                text += f"   👤 {student_name} | 🕐 {dt}\n\n"
+                
+                # Show appropriate time info
+                if m['status'] == 'slot_requested' and m.get('time_slot_start'):
+                    date_str = m['time_slot_start'][:10]
+                    slot_start = m['time_slot_start'][11:16]
+                    slot_end = m['time_slot_end'][11:16] if m.get('time_slot_end') else '—'
+                    text += f"   👤 {student_name} | 📅 {date_str} {slot_start}-{slot_end}\n\n"
+                elif m.get('confirmed_time'):
+                    dt = to_msk_str(m['confirmed_time'])
+                    text += f"   👤 {student_name} | 🕐 {dt}\n\n"
+                else:
+                    dt = to_msk_str(m['scheduled_at'])
+                    text += f"   👤 {student_name} | 🕐 {dt}\n\n"
         else:
             text += "<i>Нет встреч</i>\n"
         
         keyboard = [[InlineKeyboardButton("« Админ", callback_data="admin:meetings")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    
+    elif action == "links" and is_admin:
+        # Показать ссылки на предстоящие встречи
+        meetings = db.get_meetings(include_past=False)
+        meetings_with_links = [m for m in meetings if m.get('meeting_link') and m['status'] != 'cancelled']
+        
+        text = "🔗 <b>Ссылки на встречи</b>\n\n"
+        
+        if meetings_with_links:
+            for m in meetings_with_links:
+                student_obj = db.get_student_by_id(m['student_id']) if m['student_id'] else None
+                student_name = (student_obj.get('first_name') or student_obj.get('username') or '?') if student_obj else '—'
+                dt = to_msk_str(m['scheduled_at'])
+                status_emoji = {'pending': '⏳', 'confirmed': '✅'}.get(m['status'], '⏳')
+                
+                text += f"{status_emoji} <b>{escape_html(m['title'])}</b>\n"
+                text += f"👤 {student_name} | 🕐 {dt}\n"
+                text += f"🔗 <a href='{m['meeting_link']}'>{m['meeting_link']}</a>\n\n"
+        else:
+            text += "<i>Нет встреч со ссылками</i>\n"
+        
+        keyboard = [[InlineKeyboardButton("« Встречи", callback_data="admin:meetings")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def meeting_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2159,6 +2212,235 @@ async def meeting_action_callback(update: Update, context: ContextTypes.DEFAULT_
             f"❌ Запрос отклонён.\n\nСтудент уведомлён.",
             reply_markup=back_to_admin_keyboard()
         )
+
+
+# === TIME SLOT SELECTION FOR MEETINGS ===
+
+async def meeting_slot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show available times within a slot for mentor to choose"""
+    query = update.callback_query
+    await safe_answer(query)
+    user = update.effective_user
+    
+    if not db.is_admin(user.id):
+        await query.edit_message_text("⛔ Только для админов/менторов")
+        return
+    
+    parts = query.data.split(":")
+    meeting_id = int(parts[1])
+    
+    meeting = db.get_meeting(meeting_id)
+    if not meeting:
+        await query.edit_message_text("Встреча не найдена.")
+        return
+    
+    # Get available times
+    times = db.get_meeting_slot_times(meeting_id)
+    if not times:
+        await query.edit_message_text("❌ Не удалось получить доступные времена")
+        return
+    
+    # Create buttons for each available time (3 per row)
+    buttons = []
+    row = []
+    for t in times:
+        row.append(InlineKeyboardButton(t, callback_data=f"meeting_slot_time:{meeting_id}:{t}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="admin:meetings")])
+    
+    student_obj = db.get_student_by_id(meeting['student_id']) if meeting['student_id'] else None
+    student_name = (student_obj.get('first_name') or student_obj.get('username') or '?') if student_obj else '—'
+    
+    # Format date from time_slot_start
+    date_str = meeting['time_slot_start'][:10] if meeting.get('time_slot_start') else '—'
+    slot_start = meeting['time_slot_start'][11:16] if meeting.get('time_slot_start') else '—'
+    slot_end = meeting['time_slot_end'][11:16] if meeting.get('time_slot_end') else '—'
+    
+    await query.edit_message_text(
+        f"🕐 <b>Выберите время для встречи</b>\n\n"
+        f"👤 {escape_html(student_name)}\n"
+        f"📋 {escape_html(meeting['title'])}\n"
+        f"📅 Дата: {date_str}\n"
+        f"⏱ {meeting['duration_minutes']} мин\n"
+        f"🕐 Удобно студенту: {slot_start} — {slot_end}\n\n"
+        f"<b>Выберите время начала:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+
+async def meeting_slot_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle time selection from slot - ask for meeting link"""
+    query = update.callback_query
+    await safe_answer(query)
+    user = update.effective_user
+    
+    if not db.is_admin(user.id):
+        await query.edit_message_text("⛔ Только для админов/менторов")
+        return
+    
+    parts = query.data.split(":")
+    meeting_id = int(parts[1])
+    selected_time = ":".join(parts[2:])  # e.g., "18:00" - rejoin since time contains ":"
+    
+    meeting = db.get_meeting(meeting_id)
+    if not meeting:
+        await query.edit_message_text("Встреча не найдена.")
+        return
+    
+    # Store selection and ask for link
+    context.user_data["creating"] = "meeting_slot_link"
+    context.user_data["slot_meeting_id"] = meeting_id
+    context.user_data["slot_selected_time"] = selected_time
+    
+    student_obj = db.get_student_by_id(meeting['student_id']) if meeting['student_id'] else None
+    student_name = (student_obj.get('first_name') or student_obj.get('username') or '?') if student_obj else '—'
+    
+    date_str = meeting['time_slot_start'][:10] if meeting.get('time_slot_start') else '—'
+    
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:meetings")]])
+    
+    await query.edit_message_text(
+        f"✅ <b>Время выбрано: {selected_time}</b>\n\n"
+        f"👤 {escape_html(student_name)}\n"
+        f"📋 {escape_html(meeting['title'])}\n"
+        f"📅 {date_str} {selected_time}\n"
+        f"⏱ {meeting['duration_minutes']} мин\n\n"
+        f"<b>Отправьте ссылку на Телемост:</b>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+
+# === MEETING DURATION SELECTION ===
+
+async def meeting_duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle duration selection for admin meeting creation"""
+    query = update.callback_query
+    await safe_answer(query)
+    user = update.effective_user
+    
+    if not db.is_admin(user.id):
+        await query.edit_message_text("⛔ Только для админов")
+        return
+    
+    parts = query.data.split(":")
+    duration = int(parts[1])
+    
+    meeting_data = context.user_data.get("meeting_data")
+    if not meeting_data:
+        await query.edit_message_text("❌ Данные встречи не найдены", reply_markup=back_to_admin_keyboard())
+        return
+    
+    student_id = context.user_data.get("meeting_student_id")
+    meeting_id = db.create_meeting(
+        student_id, 
+        meeting_data["title"], 
+        meeting_data["link"], 
+        meeting_data["scheduled_at"], 
+        duration, 
+        user.id
+    )
+    
+    # Clear context
+    context.user_data.pop("creating", None)
+    context.user_data.pop("meeting_data", None)
+    context.user_data.pop("meeting_student_id", None)
+    
+    # Notify student
+    if student_id:
+        student = db.get_student_by_id(student_id)
+        if student:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Подтвердить", callback_data=f"meeting_confirm:{meeting_id}")],
+                [InlineKeyboardButton("❌ Отклонить", callback_data=f"meeting_decline:{meeting_id}")]
+            ])
+            try:
+                await context.bot.send_message(
+                    student["user_id"],
+                    f"📅 <b>Назначена встреча!</b>\n\n"
+                    f"<b>{escape_html(meeting_data['title'])}</b>\n"
+                    f"🕐 {meeting_data['dt_str']}\n"
+                    f"⏱ {duration} мин\n\n"
+                    f"🔗 <a href='{meeting_data['link']}'>Открыть в Телемосте</a>",
+                    parse_mode="HTML",
+                    reply_markup=keyboard
+                )
+            except Exception:
+                pass
+    
+    await query.edit_message_text(
+        f"✅ Встреча создана!\n\n"
+        f"📅 {escape_html(meeting_data['title'])}\n🕐 {meeting_data['dt_str']}\n⏱ {duration} мин",
+        reply_markup=back_to_admin_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+async def meeting_request_duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle duration selection for student meeting request"""
+    query = update.callback_query
+    await safe_answer(query)
+    user = update.effective_user
+    student = db.get_student(user.id)
+    
+    if not student:
+        await query.edit_message_text("⛔ Нужна регистрация", reply_markup=back_to_menu_keyboard())
+        return
+    
+    parts = query.data.split(":")
+    duration = int(parts[1])
+    
+    request_data = context.user_data.get("meeting_request_data")
+    if not request_data:
+        await query.edit_message_text("❌ Данные запроса не найдены", reply_markup=back_to_menu_keyboard())
+        return
+    
+    # Create meeting request (no link yet, status = requested)
+    meeting_id = db.create_meeting(
+        student['id'], 
+        request_data["title"], 
+        "", 
+        request_data["scheduled_at"], 
+        duration, 
+        student['user_id']
+    )
+    with db.get_db() as conn:
+        conn.execute("UPDATE meetings SET status = 'requested' WHERE id = ?", (meeting_id,))
+    
+    # Clear context
+    context.user_data.pop("creating", None)
+    context.user_data.pop("meeting_request_data", None)
+    
+    # Notify assigned mentors (or all admins as fallback)
+    student_name = student.get('first_name') or student.get('username') or '?'
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"meeting_approve:{meeting_id}")],
+        [InlineKeyboardButton("❌ Отклонить", callback_data=f"meeting_reject:{meeting_id}")]
+    ])
+    
+    await notify_mentors(
+        context, student['id'],
+        f"🔔 <b>Запрос на встречу!</b>\n\n"
+        f"👤 От: <b>{escape_html(student_name)}</b>\n"
+        f"📋 Тема: <b>{escape_html(request_data['title'])}</b>\n"
+        f"🕐 Время: {request_data['dt_str']}\n"
+        f"⏱ {duration} мин",
+        keyboard=keyboard
+    )
+    
+    await query.edit_message_text(
+        f"✅ Запрос отправлен ментору!\n\n"
+        f"📋 {escape_html(request_data['title'])}\n🕐 {request_data['dt_str']}\n⏱ {duration} мин\n\n"
+        f"Ожидай подтверждения.",
+        reply_markup=back_to_menu_keyboard(),
+        parse_mode="HTML"
+    )
 
 
 # === QUIZ ===
@@ -2430,8 +2712,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if context.user_data.get("creating") == "meeting":
             lines = text.strip().split("\n")
-            if len(lines) < 4:
-                await update.message.reply_text("❌ Нужно 4 строки: название, ссылка, дата, длительность")
+            if len(lines) < 3:
+                await update.message.reply_text("❌ Нужно 3 строки: название, ссылка, дата")
                 return
             title = lines[0].strip()
             link = lines[1].strip()
@@ -2440,43 +2722,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 await update.message.reply_text("❌ Неверный формат даты. Нужно: YYYY-MM-DD HH:MM")
                 return
-            try:
-                duration = int(lines[3].strip())
-            except ValueError:
-                duration = 30
             
-            student_id = context.user_data.get("meeting_student_id")
-            meeting_id = db.create_meeting(student_id, title, link, scheduled_at, duration, user.id)
-            del context.user_data["creating"]
-            context.user_data.pop("meeting_student_id", None)
+            context.user_data["meeting_data"] = {
+                "title": title,
+                "link": link,
+                "scheduled_at": scheduled_at,
+                "dt_str": lines[2].strip()
+            }
+            context.user_data["creating"] = "meeting_duration"
             
-            # Notify student
-            if student_id:
-                student = db.get_student_by_id(student_id)
-                if student:
-                    dt_str = lines[2].strip()
-                    keyboard = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"meeting_confirm:{meeting_id}")],
-                        [InlineKeyboardButton("❌ Отклонить", callback_data=f"meeting_decline:{meeting_id}")]
-                    ])
-                    try:
-                        await context.bot.send_message(
-                            student["user_id"],
-                            f"📅 <b>Назначена встреча!</b>\n\n"
-                            f"<b>{escape_html(title)}</b>\n"
-                            f"🕐 {dt_str}\n"
-                            f"⏱ {duration} мин\n\n"
-                            f"🔗 <a href='{link}'>Открыть в Телемосте</a>",
-                            parse_mode="HTML",
-                            reply_markup=keyboard
-                        )
-                    except Exception:
-                        pass
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("15 мин", callback_data="meeting_dur:15"),
+                    InlineKeyboardButton("30 мин", callback_data="meeting_dur:30"),
+                ],
+                [
+                    InlineKeyboardButton("45 мин", callback_data="meeting_dur:45"),
+                    InlineKeyboardButton("60 мин", callback_data="meeting_dur:60"),
+                ],
+                [
+                    InlineKeyboardButton("90 мин", callback_data="meeting_dur:90"),
+                    InlineKeyboardButton("120 мин", callback_data="meeting_dur:120"),
+                ],
+                [InlineKeyboardButton("❌ Отмена", callback_data="admin:meetings")]
+            ])
             
             await update.message.reply_text(
-                f"✅ Встреча создана!\n\n"
-                f"📅 {title}\n🕐 {lines[2].strip()}\n⏱ {duration} мин",
-                reply_markup=back_to_admin_keyboard()
+                f"📅 <b>{escape_html(title)}</b>\n"
+                f"🕐 {lines[2].strip()}\n\n"
+                f"<b>Выбери длительность созвона:</b>",
+                reply_markup=keyboard, parse_mode="HTML"
             )
             return
         
@@ -2522,6 +2797,64 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("approve_meeting_id", None)
             await update.message.reply_text("✅ Встреча подтверждена, ссылка отправлена студенту!", 
                                            reply_markup=back_to_admin_keyboard())
+            return
+        
+        if context.user_data.get("creating") == "meeting_slot_link":
+            # Mentor entering telemost link after selecting time from slot
+            meeting_id = context.user_data.get("slot_meeting_id")
+            selected_time = context.user_data.get("slot_selected_time")
+            
+            if not meeting_id or not selected_time:
+                await update.message.reply_text("❌ Данные не найдены")
+                return
+            
+            link = text.strip()
+            if not link.startswith("http"):
+                await update.message.reply_text("❌ Отправь ссылку на Яндекс.Телемост")
+                return
+            
+            meeting = db.get_meeting(meeting_id)
+            if not meeting:
+                await update.message.reply_text("❌ Встреча не найдена")
+                return
+            
+            # Build confirmed time from date + selected time
+            date_str = meeting['time_slot_start'][:10] if meeting.get('time_slot_start') else ''
+            confirmed_time = f"{date_str}T{selected_time}:00"
+            
+            # Confirm meeting with selected time
+            db.confirm_meeting_time(meeting_id, confirmed_time, link)
+            
+            # Notify student
+            if meeting['student_id']:
+                student_obj = db.get_student_by_id(meeting['student_id'])
+                if student_obj:
+                    dt_formatted = f"{date_str} {selected_time}"
+                    try:
+                        await context.bot.send_message(
+                            student_obj['user_id'],
+                            f"✅ <b>Встреча подтверждена!</b>\n\n"
+                            f"<b>{escape_html(meeting['title'])}</b>\n"
+                            f"🕐 {dt_formatted}\n"
+                            f"⏱ {meeting['duration_minutes']} мин\n\n"
+                            f"🔗 <a href='{link}'>Открыть в Телемосте</a>\n\n"
+                            f"Напоминание придёт за 24 часа и за 1 час.",
+                            parse_mode="HTML",
+                            disable_web_page_preview=True
+                        )
+                    except Exception:
+                        pass
+            
+            # Clear context
+            del context.user_data["creating"]
+            context.user_data.pop("slot_meeting_id", None)
+            context.user_data.pop("slot_selected_time", None)
+            
+            await update.message.reply_text(
+                f"✅ Встреча подтверждена на {date_str} {selected_time}!\n"
+                f"Ссылка отправлена студенту.",
+                reply_markup=back_to_admin_keyboard()
+            )
             return
         
         if context.user_data.get("creating") == "question":
@@ -2652,7 +2985,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ Студент архивирован!\n\n💬 Отзыв сохранён.", reply_markup=back_to_admin_keyboard())
             return
     
-    # Student meeting request (outside admin block)
+    # Student meeting request with time slot (outside admin block)
     if context.user_data.get("creating") == "meeting_request":
         student = db.get_student(user.id)
         if not student:
@@ -2660,34 +2993,69 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         lines = text.strip().split("\n")
-        if len(lines) < 3:
-            await update.message.reply_text("❌ Нужно 3 строки: тема, дата/время, длительность")
+        if len(lines) < 4:
+            await update.message.reply_text(
+                "❌ Нужно 4 строки:\n"
+                "1. Тема встречи\n"
+                "2. Дата (YYYY-MM-DD)\n"
+                "3. Интервал (HH:MM-HH:MM)\n"
+                "4. Длительность в минутах"
+            )
             return
         
         title = lines[0].strip()
-        try:
-            scheduled_at = datetime.strptime(lines[1].strip(), "%Y-%m-%d %H:%M").isoformat()
-        except ValueError:
-            await update.message.reply_text("❌ Неверный формат даты. Нужно: YYYY-MM-DD HH:MM")
-            return
-        try:
-            duration = int(lines[2].strip())
-        except ValueError:
-            duration = 30
+        date_str = lines[1].strip()
+        time_slot = lines[2].strip()
         
-        # Create meeting request (no link yet, status = requested)
-        meeting_id = db.create_meeting(student['id'], title, "", scheduled_at, duration, student['user_id'])
-        with db.get_db() as conn:
-            conn.execute("UPDATE meetings SET status = 'requested' WHERE id = ?", (meeting_id,))
+        # Validate date
+        try:
+            datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат даты. Нужно: YYYY-MM-DD")
+            return
+        
+        # Parse time slot (e.g., "16:00-21:00")
+        slot_match = re.match(r'^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$', time_slot)
+        if not slot_match:
+            await update.message.reply_text("❌ Неверный формат интервала. Нужно: HH:MM-HH:MM (например, 16:00-21:00)")
+            return
+        
+        time_start = slot_match.group(1)
+        time_end = slot_match.group(2)
+        
+        # Validate times
+        try:
+            start_dt = datetime.strptime(f"{date_str} {time_start}", "%Y-%m-%d %H:%M")
+            end_dt = datetime.strptime(f"{date_str} {time_end}", "%Y-%m-%d %H:%M")
+            if end_dt <= start_dt:
+                await update.message.reply_text("❌ Конец интервала должен быть позже начала")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат времени")
+            return
+        
+        # Parse duration
+        try:
+            duration = int(lines[3].strip())
+            if duration < 15 or duration > 180:
+                await update.message.reply_text("❌ Длительность должна быть от 15 до 180 минут")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ Длительность должна быть числом (минуты)")
+            return
+        
+        # Create meeting with time slot
+        meeting_id = db.create_meeting_with_slot(
+            student['id'], title, date_str, time_start, time_end, duration, student['user_id']
+        )
         
         del context.user_data["creating"]
         
-        # Notify assigned mentors (or all admins as fallback)
+        # Notify assigned mentors
         student_name = student.get('first_name') or student.get('username') or '?'
-        dt_str = lines[1].strip()
         
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Подтвердить", callback_data=f"meeting_approve:{meeting_id}")],
+            [InlineKeyboardButton("🕐 Выбрать время", callback_data=f"meeting_slot:{meeting_id}")],
             [InlineKeyboardButton("❌ Отклонить", callback_data=f"meeting_reject:{meeting_id}")]
         ])
         
@@ -2696,16 +3064,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔔 <b>Запрос на встречу!</b>\n\n"
             f"👤 От: <b>{escape_html(student_name)}</b>\n"
             f"📋 Тема: <b>{escape_html(title)}</b>\n"
-            f"🕐 Время: {dt_str}\n"
-            f"⏱ {duration} мин",
+            f"📅 Дата: {date_str}\n"
+            f"🕐 Удобное время: {time_start} — {time_end}\n"
+            f"⏱ {duration} мин\n\n"
+            f"<i>Выберите конкретное время для встречи</i>",
             keyboard=keyboard
         )
         
         await update.message.reply_text(
             f"✅ Запрос отправлен ментору!\n\n"
-            f"📋 {title}\n🕐 {dt_str}\n⏱ {duration} мин\n\n"
-            f"Ожидай подтверждения.",
-            reply_markup=back_to_menu_keyboard()
+            f"📋 {escape_html(title)}\n"
+            f"📅 {date_str}\n"
+            f"🕐 Интервал: {time_start} — {time_end}\n"
+            f"⏱ {duration} мин\n\n"
+            f"<i>Ментор выберет удобное время и подтвердит встречу</i>",
+            parse_mode="HTML"
         )
         return
     
@@ -3037,6 +3410,10 @@ def main():
     app.add_handler(CallbackQueryHandler(announcements_callback, pattern="^announcements:"))
     app.add_handler(CallbackQueryHandler(meetings_callback, pattern="^meetings:"))
     app.add_handler(CallbackQueryHandler(meeting_action_callback, pattern="^meeting_confirm:|^meeting_decline:|^meeting_approve:|^meeting_reject:"))
+    app.add_handler(CallbackQueryHandler(meeting_slot_callback, pattern="^meeting_slot:"))
+    app.add_handler(CallbackQueryHandler(meeting_slot_time_callback, pattern="^meeting_slot_time:"))
+    app.add_handler(CallbackQueryHandler(meeting_duration_callback, pattern="^meeting_dur:"))
+    app.add_handler(CallbackQueryHandler(meeting_request_duration_callback, pattern="^meeting_req_dur:"))
     app.add_handler(CallbackQueryHandler(quiz_callback, pattern="^quiz:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.FileExtension("py"), handle_file))
