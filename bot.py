@@ -1024,14 +1024,16 @@ async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif action == "task":
         topics = db.get_topics()
-        if not topics:
-            await query.edit_message_text("Сначала создай тему.", reply_markup=back_to_admin_keyboard())
-            return
         context.user_data["creating"] = "task"
-        text = "📝 <b>Новое задание</b>\n\nТемы:\n"
-        for t in topics:
-            text += f"• <code>{t['topic_id']}</code>: {escape_html(t['name'])}\n"
-        text += "\nОтправь в формате:\n<code>TOPIC: topic_id\nTASK_ID: task_id\nTITLE: Название\n---DESCRIPTION---\nОписание\n---TESTS---\ndef test(): ...</code>"
+        text = "📝 <b>Новое задание</b>\n\n"
+        if topics:
+            text += "Существующие темы:\n"
+            for t in topics[:10]:
+                text += f"• <code>{t['topic_id']}</code>: {escape_html(t['name'])}\n"
+            text += "\n"
+        text += "💡 <i>Если темы нет — она создастся автоматически!</i>\n"
+        text += "Префиксы: go_, python_, linux_, sql_, docker_, git_\n\n"
+        text += "Отправь в формате:\n<code>TOPIC: go_basics\nTASK_ID: task_id\nTITLE: Название\nLANGUAGE: go\n---DESCRIPTION---\nОписание\n---TESTS---\nfunc Test... или def test(): ...</code>"
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:tasks")]])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
     
@@ -1128,11 +1130,16 @@ async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "questions_bulk":
         context.user_data["creating"] = "questions_bulk"
         topics = db.get_topics()
-        text = "📥 <b>Импорт вопросов</b>\n\nТемы:\n"
-        for t in topics[:15]:
-            text += f"• <code>{t['topic_id']}</code>: {escape_html(t['name'])}\n"
-        text += "\nОтправь вопросы в формате:\n"
-        text += "<code>TOPIC: topic_id\n\n"
+        text = "📥 <b>Импорт вопросов</b>\n\n"
+        if topics:
+            text += "Существующие темы:\n"
+            for t in topics[:10]:
+                text += f"• <code>{t['topic_id']}</code>: {escape_html(t['name'])}\n"
+            text += "\n"
+        text += "💡 <i>Если темы нет — она создастся автоматически!</i>\n"
+        text += "Префиксы: go_, python_, linux_, sql_, docker_, git_\n\n"
+        text += "Отправь вопросы в формате:\n"
+        text += "<code>TOPIC: go_basics\n\n"
         text += "Q: Текст вопроса?\n"
         text += "A) Вариант 1\n"
         text += "B) Вариант 2\n"
@@ -2663,15 +2670,70 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not parsed:
                 await update.message.reply_text("❌ Неверный формат.")
                 return
-            topic = db.get_topic(parsed["topic_id"])
+            
+            topic_id = parsed["topic_id"]
+            topic = db.get_topic(topic_id)
+            
+            # Auto-create topic and module if not exists
+            created_module = None
+            created_topic = None
             if not topic:
-                await update.message.reply_text(f"❌ Тема не найдена.", parse_mode="HTML")
-                return
+                # Determine module from topic_id prefix
+                prefix_to_module = {
+                    "go_": ("go", "Go", "go"),
+                    "python_": ("python", "Python", "python"),
+                    "linux_": ("linux", "Linux", "other"),
+                    "sql_": ("sql", "SQL & Базы данных", "other"),
+                    "docker_": ("docker", "Docker & Контейнеры", "other"),
+                    "git_": ("git", "Git & Version Control", "other"),
+                    "network_": ("network", "Сети", "other"),
+                    "algo_": ("algo", "Алгоритмы", "python"),
+                    "system_": ("system", "System Design", "other"),
+                    "web_": ("web", "Web & HTTP", "other"),
+                }
+                
+                module_id = "other"
+                module_name = "Другое"
+                module_lang = parsed.get("language", "python")
+                
+                for prefix, (mod_id, mod_name, mod_lang_default) in prefix_to_module.items():
+                    if topic_id.startswith(prefix):
+                        module_id = mod_id
+                        module_name = mod_name
+                        module_lang = mod_lang_default
+                        break
+                
+                # Create module if needed
+                if not db.get_module(module_id):
+                    db.add_module(module_id, module_name, order_num=100, language=module_lang)
+                    created_module = module_name
+                
+                # Generate topic name from topic_id
+                topic_name = topic_id.replace("_", " ").title()
+                for prefix in prefix_to_module.keys():
+                    if topic_id.startswith(prefix):
+                        topic_name = topic_id[len(prefix):].replace("_", " ").title()
+                        break
+                
+                if not db.add_topic(topic_id, topic_name, module_id, order_num=0):
+                    await update.message.reply_text(f"❌ Не удалось создать тему {topic_id}")
+                    return
+                topic = db.get_topic(topic_id)
+                if not topic:
+                    await update.message.reply_text(f"❌ Ошибка при создании темы {topic_id}")
+                    return
+                created_topic = topic_name
+            
             lang = parsed.get("language", "python")
-            if db.add_task(parsed["task_id"], parsed["topic_id"], parsed["title"], parsed["description"], parsed["test_code"], lang):
+            if db.add_task(parsed["task_id"], topic_id, parsed["title"], parsed["description"], parsed["test_code"], lang):
                 del context.user_data["creating"]
                 lang_name = "Go 🐹" if lang == "go" else "Python 🐍"
-                await update.message.reply_text(f"✅ Задание создано! ({lang_name})", reply_markup=back_to_admin_keyboard())
+                result_text = f"✅ Задание создано! ({lang_name})"
+                if created_module:
+                    result_text += f"\n📦 Создан модуль: <b>{escape_html(created_module)}</b>"
+                if created_topic:
+                    result_text += f"\n📁 Создана тема: <b>{escape_html(created_topic)}</b>"
+                await update.message.reply_text(result_text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
             else:
                 await update.message.reply_text("❌ ID занят.")
             return
@@ -2908,9 +2970,57 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             topic_id = topic_match.group(1)
             topic = db.get_topic(topic_id)
+            
+            # Auto-create topic and module if not exists
+            created_module = None
+            created_topic = None
             if not topic:
-                await update.message.reply_text(f"❌ Тема {topic_id} не найдена")
-                return
+                # Determine module from topic_id prefix
+                prefix_to_module = {
+                    "go_": ("go", "Go", "go"),
+                    "python_": ("python", "Python", "python"),
+                    "linux_": ("linux", "Linux", "other"),
+                    "sql_": ("sql", "SQL & Базы данных", "other"),
+                    "docker_": ("docker", "Docker & Контейнеры", "other"),
+                    "git_": ("git", "Git & Version Control", "other"),
+                    "network_": ("network", "Сети", "other"),
+                    "algo_": ("algo", "Алгоритмы", "python"),
+                    "system_": ("system", "System Design", "other"),
+                    "web_": ("web", "Web & HTTP", "other"),
+                }
+                
+                module_id = "other"
+                module_name = "Другое"
+                module_lang = "other"
+                
+                for prefix, (mod_id, mod_name, mod_lang) in prefix_to_module.items():
+                    if topic_id.startswith(prefix):
+                        module_id = mod_id
+                        module_name = mod_name
+                        module_lang = mod_lang
+                        break
+                
+                # Create module if needed
+                if not db.get_module(module_id):
+                    db.add_module(module_id, module_name, order_num=100, language=module_lang)
+                    created_module = module_name
+                
+                # Generate topic name from topic_id
+                topic_name = topic_id.replace("_", " ").title()
+                # Clean up prefix for better name
+                for prefix in prefix_to_module.keys():
+                    if topic_id.startswith(prefix):
+                        topic_name = topic_id[len(prefix):].replace("_", " ").title()
+                        break
+                
+                if not db.add_topic(topic_id, topic_name, module_id, order_num=0):
+                    await update.message.reply_text(f"❌ Не удалось создать тему {topic_id}")
+                    return
+                topic = db.get_topic(topic_id)
+                if not topic:
+                    await update.message.reply_text(f"❌ Ошибка при создании темы {topic_id}")
+                    return
+                created_topic = topic_name
             
             # Split by Q: marker
             questions_raw = re.split(r'\nQ:\s*', text)
@@ -2941,8 +3051,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     added += 1
             
             del context.user_data["creating"]
+            
+            result_text = f"✅ Импортировано <b>{added}</b> вопросов в тему <b>{escape_html(topic['name'])}</b>!"
+            if created_module:
+                result_text += f"\n📦 Создан модуль: <b>{escape_html(created_module)}</b>"
+            if created_topic:
+                result_text += f"\n📁 Создана тема: <b>{escape_html(created_topic)}</b>"
+            
             await update.message.reply_text(
-                f"✅ Импортировано {added} вопросов в тему {escape_html(topic['name'])}!",
+                result_text,
                 reply_markup=back_to_admin_keyboard(),
                 parse_mode="HTML"
             )
