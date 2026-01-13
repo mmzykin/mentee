@@ -894,23 +894,21 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
     
     elif action == "tasks":
-        text = "📝 <b>Задания</b>\n\n"
-        has_tasks = False
+        text = "📝 <b>Задания</b>\n\nНажми на задание для управления:\n\n"
+        keyboard = []
         for topic in db.get_topics():
             tasks = db.get_tasks_by_topic(topic["topic_id"])
             if tasks:
-                has_tasks = True
-                text += f"<b>{escape_html(topic['name'])}</b>\n"
                 for t in tasks:
-                    text += f"  • <code>{t['task_id']}</code>: {escape_html(t['title'])}\n"
-                text += "\n"
-        if not has_tasks:
+                    lang = t.get("language", "python")
+                    emoji = "🐹" if lang == "go" else "🐍"
+                    btn_text = f"{emoji} {t['task_id']}: {t['title'][:25]}"
+                    keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"admintask:{t['task_id']}")])
+        if not keyboard:
             text += "<i>Пусто</i>\n"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Добавить задание", callback_data="create:task")],
-            [InlineKeyboardButton("« Админ", callback_data="menu:admin")]
-        ])
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+        keyboard.append([InlineKeyboardButton("➕ Добавить задание", callback_data="create:task")])
+        keyboard.append([InlineKeyboardButton("« Админ", callback_data="menu:admin")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     
     elif action == "students":
         students = db.get_active_students_stats()
@@ -1419,6 +1417,72 @@ async def unapprove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     db.unapprove_submission(sub_id)
     await safe_answer(query, "Отменено.", show_alert=True)
     await code_callback(update, context)
+
+
+async def admintask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin task management - view/delete tasks"""
+    query = update.callback_query
+    await safe_answer(query)
+    if not db.is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔")
+        return
+    
+    parts = query.data.split(":")
+    action = parts[0]
+    task_id = parts[1] if len(parts) > 1 else None
+    
+    if action == "admintask" and task_id:
+        task = db.get_task(task_id)
+        if not task:
+            await query.edit_message_text("Задание не найдено.", reply_markup=back_to_admin_keyboard())
+            return
+        
+        lang = task.get("language", "python")
+        lang_label = "🐹 Go" if lang == "go" else "🐍 Python"
+        desc = escape_html(task["description"][:500])
+        if len(task["description"]) > 500:
+            desc += "..."
+        
+        text = (
+            f"📝 <b>{escape_html(task['title'])}</b>\n"
+            f"ID: <code>{task_id}</code> • {lang_label}\n"
+            f"Тема: <code>{task['topic_id']}</code>\n\n"
+            f"<b>Описание:</b>\n<pre>{desc}</pre>"
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑 Удалить задание", callback_data=f"deltask:{task_id}")],
+            [InlineKeyboardButton("« Задания", callback_data="admin:tasks")]
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    
+    elif action == "deltask" and task_id:
+        task = db.get_task(task_id)
+        if not task:
+            await query.edit_message_text("Задание не найдено.", reply_markup=back_to_admin_keyboard())
+            return
+        
+        text = (
+            f"⚠️ <b>Удалить задание?</b>\n\n"
+            f"<code>{task_id}</code>: {escape_html(task['title'])}\n\n"
+            f"Это действие необратимо!"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Да, удалить", callback_data=f"deltask_confirm:{task_id}"),
+                InlineKeyboardButton("❌ Отмена", callback_data=f"admintask:{task_id}")
+            ]
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    
+    elif action == "deltask_confirm" and task_id:
+        if db.delete_task(task_id):
+            await safe_answer(query, "✅ Задание удалено!", show_alert=True)
+        else:
+            await safe_answer(query, "❌ Ошибка удаления.", show_alert=True)
+        # Return to tasks list
+        query.data = "admin:tasks"
+        await admin_callback(update, context)
 
 
 async def cheater_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3551,6 +3615,7 @@ def main():
     app.add_handler(CallbackQueryHandler(code_callback, pattern="^code:"))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve:"))
     app.add_handler(CallbackQueryHandler(unapprove_callback, pattern="^unapprove:"))
+    app.add_handler(CallbackQueryHandler(admintask_callback, pattern="^admintask:|^deltask:|^deltask_confirm:"))
     app.add_handler(CallbackQueryHandler(cheater_callback, pattern="^cheater:"))
     app.add_handler(CallbackQueryHandler(feedback_callback, pattern="^feedback:"))
     app.add_handler(CallbackQueryHandler(delsub_callback, pattern="^delsub:"))
