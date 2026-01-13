@@ -1315,7 +1315,8 @@ async def code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = []
     row1 = []
-    if sub["passed"] and not sub.get("approved") and not is_cheated:
+    if not sub.get("approved") and not is_cheated:
+        # Allow approval for both passed and failed (in case of test bugs)
         row1.append(InlineKeyboardButton("⭐ Аппрув", callback_data=f"approve:{sub_id}"))
     elif sub.get("approved"):
         row1.append(InlineKeyboardButton("❌ Убрать аппрув", callback_data=f"unapprove:{sub_id}"))
@@ -1343,6 +1344,7 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     sub_id = int(query.data.split(":")[1])
     sub = db.get_submission_by_id(sub_id)
+    was_failed = sub and not sub["passed"]
     if db.approve_submission(sub_id, BONUS_POINTS_PER_APPROVAL):
         await safe_answer(query, "⭐ Аппрувнуто!", show_alert=True)
         # Notify student
@@ -1351,12 +1353,17 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if student:
                 task = db.get_task(sub["task_id"])
                 task_name = task["title"] if task else sub["task_id"]
-                await notify_student(
-                    context, student["user_id"],
-                    f"⭐ <b>Ваше решение аппрувнуто!</b>\n\n"
-                    f"Задание: <b>{escape_html(task_name)}</b>\n"
-                    f"Вы получили +{BONUS_POINTS_PER_APPROVAL} бонус!"
-                )
+                # Different message if we're approving a failed submission
+                if was_failed:
+                    msg = (f"⭐ <b>Ваше решение засчитано вручную!</b>\n\n"
+                           f"Задание: <b>{escape_html(task_name)}</b>\n"
+                           f"Ментор проверил и подтвердил правильность.\n"
+                           f"Вы получили +{BONUS_POINTS_PER_APPROVAL} бонус!")
+                else:
+                    msg = (f"⭐ <b>Ваше решение аппрувнуто!</b>\n\n"
+                           f"Задание: <b>{escape_html(task_name)}</b>\n"
+                           f"Вы получили +{BONUS_POINTS_PER_APPROVAL} бонус!")
+                await notify_student(context, student["user_id"], msg)
     else:
         await safe_answer(query, "Уже или ошибка.", show_alert=True)
     await code_callback(update, context)
