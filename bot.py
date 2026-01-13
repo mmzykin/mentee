@@ -43,6 +43,47 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 EXEC_TIMEOUT = 10
 ADMIN_USERNAMES = ["qwerty1492", "redd_dd"]
 BONUS_POINTS_PER_APPROVAL = 1
+def get_raw_text(message) -> str:
+    """
+    Reconstruct raw text from message, restoring formatting symbols.
+    Telegram parses __text__ as underline and removes the underscores.
+    This function restores them for code that uses __name__, __init__, etc.
+    """
+    if not message or not message.text:
+        return ""
+    
+    text = message.text
+    entities = message.entities or []
+    
+    if not entities:
+        return text
+    
+    # Sort entities by offset in reverse order to insert from the end
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    
+    result = text
+    for entity in sorted_entities:
+        start = entity.offset
+        end = entity.offset + entity.length
+        
+        # Restore underline formatting (__text__)
+        if entity.type == "underline":
+            result = result[:end] + "__" + result[end:]
+            result = result[:start] + "__" + result[start:]
+        # Restore italic formatting (_text_ or *text*)
+        elif entity.type == "italic":
+            result = result[:end] + "_" + result[end:]
+            result = result[:start] + "_" + result[start:]
+        # Restore bold formatting (*text* or **text**)
+        elif entity.type == "bold":
+            result = result[:end] + "*" + result[end:]
+            result = result[:start] + "*" + result[start:]
+        # Restore strikethrough (~~text~~)
+        elif entity.type == "strikethrough":
+            result = result[:end] + "~~" + result[end:]
+            result = result[:start] + "~~" + result[start:]
+    
+    return result
 
 
 def main_menu_keyboard(is_admin=False, has_assigned=False, can_spin=False, unread_announcements=0):
@@ -2634,8 +2675,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
     user = update.effective_user
-    text = update.message.text.strip()
-    
+    # Use get_raw_text to preserve __name__, __init__ etc. in code
+    text = get_raw_text(update.message).strip()
+
     if db.is_admin(user.id):
         if context.user_data.get("creating") == "module":
             parts = text.split()
