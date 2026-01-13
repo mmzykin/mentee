@@ -1481,8 +1481,21 @@ async def admintask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             await safe_answer(query, "❌ Ошибка удаления.", show_alert=True)
         # Return to tasks list
-        query.data = "admin:tasks"
-        await admin_callback(update, context)
+        text = "📝 <b>Задания</b>\n\nНажми на задание для управления:\n\n"
+        keyboard = []
+        for topic in db.get_topics():
+            tasks = db.get_tasks_by_topic(topic["topic_id"])
+            if tasks:
+                for t in tasks:
+                    lang = t.get("language", "python")
+                    emoji = "🐹" if lang == "go" else "🐍"
+                    btn_text = f"{emoji} {t['task_id']}: {t['title'][:25]}"
+                    keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"admintask:{t['task_id']}")])
+        if not keyboard:
+            text += "<i>Пусто</i>\n"
+        keyboard.append([InlineKeyboardButton("➕ Добавить задание", callback_data="create:task")])
+        keyboard.append([InlineKeyboardButton("« Админ", callback_data="menu:admin")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
 async def cheater_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
