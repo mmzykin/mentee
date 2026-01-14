@@ -811,3 +811,915 @@ class TestShameboard:
         call_text = query.edit_message_text.call_args[0][0]
         assert "ПОЗОРА" in call_text
         assert "Cheater" in call_text
+
+
+# ============= TOPIC CALLBACK TESTS =============
+
+class TestTopicCallback:
+    """Tests for topic navigation callback."""
+    
+    @pytest.mark.asyncio
+    async def test_topic_callback_valid(self, clean_db):
+        """Test viewing a valid topic with tasks."""
+        from bot import topic_callback
+        
+        create_task_with_topic("task1", "test_topic", "test_module")
+        student = create_registered_student(111111)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="topic:test_topic", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await topic_callback(update, context)
+        
+        query.answer.assert_called()
+        call_text = query.edit_message_text.call_args[0][0]
+        # Should show topic name
+        assert "Test Topic" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_topic_callback_invalid(self, clean_db):
+        """Test viewing invalid topic."""
+        from bot import topic_callback
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="topic:nonexistent", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await topic_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "Не найден" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_topic_shows_solved_status(self, clean_db):
+        """Test topic shows solved checkmark for completed tasks."""
+        from bot import topic_callback
+        
+        task = create_task_with_topic("task1", "test_topic", "test_module")
+        student = create_registered_student(111111)
+        # Mark task as solved
+        db.add_submission(student['id'], "task1", "code", True, "✅")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="topic:test_topic", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await topic_callback(update, context)
+        
+        # Check keyboard has checkmark for solved task
+        call_kwargs = query.edit_message_text.call_args[1]
+        keyboard = call_kwargs['reply_markup']
+        buttons = [btn.text for row in keyboard.inline_keyboard for btn in row]
+        any_solved = any("✅" in b for b in buttons)
+        assert any_solved
+
+
+# ============= TASK CALLBACK TESTS =============
+
+class TestTaskCallback:
+    """Tests for task viewing callback."""
+    
+    @pytest.mark.asyncio
+    async def test_task_callback_shows_choice(self, clean_db):
+        """Test task callback shows mode choice first."""
+        from bot import task_callback
+        
+        create_task_with_topic("task1", "test_topic", "test_module", title="Test Task")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="task:task1", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await task_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        # Should show mode choice
+        assert "режим" in call_text.lower() or "Test Task" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_task_callback_invalid(self, clean_db):
+        """Test task callback with invalid task."""
+        from bot import task_callback
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="task:nonexistent", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await task_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "Не найден" in call_text
+
+
+# ============= OPENTASK CALLBACK TESTS =============
+
+class TestOpentaskCallback:
+    """Tests for opening task without timer."""
+    
+    @pytest.mark.asyncio
+    async def test_opentask_sets_no_timer_mode(self, clean_db):
+        """Test opentask sets no_timer flag."""
+        from bot import opentask_callback
+        
+        create_task_with_topic("task1", "test_topic", "test_module", description="Task description here")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="opentask:task1", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await opentask_callback(update, context)
+        
+        # Check no_timer_task was set
+        assert context.user_data.get("no_timer_task") == "task1"
+        # Should show task content
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "Task description" in call_text or "task1" in call_text
+
+
+# ============= TIMER CALLBACK TESTS =============
+
+class TestTimerCallbacks:
+    """Tests for timer-related callbacks."""
+    
+    @pytest.mark.asyncio
+    async def test_starttimer_no_bet(self, clean_db):
+        """Test starting timer without bet."""
+        from bot import starttimer_callback
+        
+        create_task_with_topic("task1", "test_topic", "test_module")
+        student = create_registered_student(111111)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="starttimer:task1:0", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await starttimer_callback(update, context)
+        
+        # Timer should be set
+        assert context.user_data.get("task_timer") is not None
+        assert context.user_data["task_timer"]["task_id"] == "task1"
+        assert context.user_data["task_timer"]["bet"] == 0
+    
+    @pytest.mark.asyncio
+    async def test_starttimer_with_bet_enough_points(self, clean_db):
+        """Test starting timer with bet when student has enough points."""
+        from bot import starttimer_callback
+        
+        create_task_with_topic("task1", "test_topic", "test_module")
+        student = create_registered_student(111111)
+        db.add_bonus_points(student['id'], 10)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="starttimer:task1:2", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await starttimer_callback(update, context)
+        
+        # Timer should be set with bet
+        assert context.user_data["task_timer"]["bet"] == 2
+        # Points should be deducted
+        updated_student = db.get_student(111111)
+        assert updated_student['bonus_points'] == 8
+    
+    @pytest.mark.asyncio
+    async def test_starttimer_with_bet_not_enough_points(self, clean_db):
+        """Test starting timer with bet when student doesn't have enough points."""
+        from bot import starttimer_callback
+        
+        create_task_with_topic("task1", "test_topic", "test_module")
+        student = create_registered_student(111111)
+        # No points added
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="starttimer:task1:5", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await starttimer_callback(update, context)
+        
+        # Should show error, timer not set
+        query.answer.assert_called()
+        call_args = query.answer.call_args
+        assert "Недостаточно" in call_args[0][0]
+    
+    @pytest.mark.asyncio
+    async def test_resettimer_refunds_bet(self, clean_db):
+        """Test resetting timer refunds bet."""
+        from bot import resettimer_callback
+        
+        create_task_with_topic("task1", "test_topic", "test_module")
+        student = create_registered_student(111111)
+        db.add_bonus_points(student['id'], 10)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="resettimer:task1", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        
+        # Simulate timer with bet
+        from datetime import datetime
+        context = MockContext(user_data={
+            "task_timer": {
+                "task_id": "task1",
+                "start_time": datetime.now(),
+                "bet": 3
+            }
+        })
+        
+        await resettimer_callback(update, context)
+        
+        # Timer should be cleared
+        assert context.user_data.get("task_timer") is None
+        # Bet should be refunded
+        updated_student = db.get_student(111111)
+        assert updated_student['bonus_points'] == 13  # 10 + 3 refund
+
+
+# ============= GAMBLE CALLBACK TESTS =============
+
+class TestGambleCallback:
+    """Tests for gambling callback."""
+    
+    @pytest.mark.asyncio
+    async def test_gamble_callback_bet(self, clean_db):
+        """Test gamble bet."""
+        from bot import gamble_callback
+        
+        student = create_registered_student(111111)
+        db.add_bonus_points(student['id'], 10)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        # gamble:AMOUNT format
+        query = MockCallbackQuery(data="gamble:2", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await gamble_callback(update, context)
+        
+        # Result should show win or lose
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "УДВОИЛ" in call_text or "Проиграл" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_gamble_not_registered(self, clean_db):
+        """Test gamble callback for unregistered user."""
+        from bot import gamble_callback
+        
+        user = MockUser(id=999999)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="gamble:1", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await gamble_callback(update, context)
+        
+        # Should show error (no edit, just answer)
+        query.answer.assert_called()
+    
+    @pytest.mark.asyncio
+    async def test_gamble_not_enough_points(self, clean_db):
+        """Test gamble with insufficient points."""
+        from bot import gamble_callback
+        
+        student = create_registered_student(111111)
+        # No bonus points
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="gamble:5", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await gamble_callback(update, context)
+        
+        # Should show insufficient points error
+        call_args = query.answer.call_args
+        assert "Недостаточно" in call_args[0][0]
+
+
+# ============= ADMIN CALLBACK TESTS =============
+
+class TestAdminCallback:
+    """Tests for admin panel callbacks."""
+    
+    @pytest.mark.asyncio
+    async def test_admin_modules_list(self, clean_db):
+        """Test admin modules list."""
+        from bot import admin_callback
+        
+        create_admin(111111)
+        db.add_module("test_mod", "Test Module", 1, "python")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="admin:modules", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await admin_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "Модул" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_admin_topics_list(self, clean_db):
+        """Test admin topics list."""
+        from bot import admin_callback
+        
+        create_admin(111111)
+        db.add_module("mod1", "Module 1", 1, "python")
+        db.add_topic("topic1", "Topic 1", "mod1", 1)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="admin:topics", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await admin_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "Тем" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_admin_students_list(self, clean_db):
+        """Test admin students list."""
+        from bot import admin_callback
+        
+        create_admin(111111)
+        create_registered_student(222222, "student1", "Student One")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="admin:students", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await admin_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        # Should show student count or list (text is "Активные студенты")
+        assert "студент" in call_text.lower() or "ученик" in call_text.lower()
+    
+    @pytest.mark.asyncio
+    async def test_admin_codes_list(self, clean_db):
+        """Test admin codes list."""
+        from bot import admin_callback
+        
+        create_admin(111111)
+        codes = db.create_codes(3)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="admin:codes", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await admin_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "Код" in call_text or "код" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_admin_non_admin_blocked(self, clean_db):
+        """Test admin callback blocks non-admin."""
+        from bot import admin_callback
+        
+        create_registered_student(111111)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="admin:modules", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await admin_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "⛔" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_admin_my_students(self, clean_db):
+        """Test admin viewing their assigned students."""
+        from bot import admin_callback
+        
+        create_admin(111111)
+        student = create_registered_student(222222, "student1", "My Student")
+        db.assign_mentor(student['id'], 111111)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="admin:mystudents", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await admin_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        # Should show mentor's students
+        assert "ученик" in call_text.lower() or "My Student" in call_text
+
+
+# ============= STUDENT CALLBACK TESTS =============
+
+class TestStudentCallback:
+    """Tests for student profile callback."""
+    
+    @pytest.mark.asyncio
+    async def test_student_profile_view(self, clean_db):
+        """Test viewing student profile."""
+        from bot import student_callback
+        
+        create_admin(111111)
+        student = create_registered_student(222222, "teststudent", "Test Student")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        # callback format is "student:USER_ID" (telegram user_id, not internal id)
+        query = MockCallbackQuery(data="student:222222", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await student_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        # Should show student info
+        assert "Test Student" in call_text or "teststudent" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_student_not_found(self, clean_db):
+        """Test viewing non-existent student."""
+        from bot import student_callback
+        
+        create_admin(111111)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="student:99999999", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await student_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "Не найден" in call_text or "не найден" in call_text.lower()
+
+
+# ============= MY ATTEMPTS CALLBACK TESTS =============
+
+class TestMyAttemptsCallback:
+    """Tests for my attempts callback."""
+    
+    @pytest.mark.asyncio
+    async def test_myattempts_with_submissions(self, clean_db):
+        """Test viewing own attempts with submissions."""
+        from bot import myattempts_callback
+        
+        student = create_registered_student(111111, "student", "Student")
+        create_task_with_topic("task1", "t1", "m1")
+        db.add_submission(student['id'], "task1", "code1", True, "✅")
+        db.add_submission(student['id'], "task1", "code2", False, "Error")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="myattempts:0", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await myattempts_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        # Should show attempts
+        assert "попытк" in call_text.lower() or "task1" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_myattempts_empty(self, clean_db):
+        """Test viewing attempts when none exist."""
+        from bot import myattempts_callback
+        
+        create_registered_student(111111)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="myattempts:0", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await myattempts_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        # Should indicate no attempts
+        assert "пуст" in call_text.lower() or "Нет" in call_text or "попыток" in call_text
+
+
+# ============= MY ASSIGNED CALLBACK TESTS =============
+
+class TestMyAssignedCallback:
+    """Tests for my assigned tasks callback."""
+    
+    @pytest.mark.asyncio
+    async def test_myassigned_with_tasks(self, clean_db):
+        """Test viewing assigned tasks."""
+        from bot import myassigned_callback
+        
+        student = create_registered_student(111111)
+        create_task_with_topic("task1", "t1", "m1", title="Assigned Task")
+        db.assign_task(student['id'], "task1")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="myassigned:0", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await myassigned_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        # Should show assigned tasks
+        assert "Assigned Task" in call_text or "task1" in call_text or "Назначен" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_myassigned_empty(self, clean_db):
+        """Test viewing assigned when none."""
+        from bot import myassigned_callback
+        
+        create_registered_student(111111)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="myassigned:0", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await myassigned_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        # Text is "Пока ничего не назначено"
+        assert "ничего" in call_text.lower() or "Нет" in call_text or "пуст" in call_text.lower()
+
+
+# ============= ANNOUNCEMENTS CALLBACK TESTS =============
+
+class TestAnnouncementsCallback:
+    """Tests for announcements callback."""
+    
+    @pytest.mark.asyncio
+    async def test_announcements_list(self, clean_db):
+        """Test viewing announcements list."""
+        from bot import announcements_callback
+        
+        create_admin(111111)
+        db.create_announcement("Test Announcement", "Content here", 111111)
+        student = create_registered_student(222222)
+        
+        user = MockUser(id=222222)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="announcements:list", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await announcements_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "Объявлен" in call_text or "Test Announcement" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_announcements_list_marks_read(self, clean_db):
+        """Test viewing announcements list marks them as read."""
+        from bot import announcements_callback
+        
+        create_admin(111111)
+        db.create_announcement("Important News", "Full content", 111111)
+        student = create_registered_student(222222)
+        
+        # Initially unread
+        assert db.get_unread_announcements_count(student['id']) == 1
+        
+        user = MockUser(id=222222)
+        message = MockMessage(from_user=user)
+        # announcements:list marks all announcements as read
+        query = MockCallbackQuery(data="announcements:list", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await announcements_callback(update, context)
+        
+        # Should be marked as read now
+        assert db.get_unread_announcements_count(student['id']) == 0
+
+
+# ============= QUIZ CALLBACK TESTS =============
+
+class TestQuizCallback:
+    """Tests for quiz callback."""
+    
+    @pytest.mark.asyncio
+    async def test_quiz_menu(self, clean_db):
+        """Test quiz menu display."""
+        from bot import quiz_callback
+        
+        student = create_registered_student(111111)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data="quiz:menu", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await quiz_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        # Should show quiz options
+        assert "вопрос" in call_text.lower() or "квиз" in call_text.lower() or "Собес" in call_text
+
+
+# ============= APPROVE/UNAPPROVE CALLBACK TESTS =============
+
+class TestApprovalCallbacks:
+    """Tests for approval callbacks."""
+    
+    @pytest.mark.asyncio
+    async def test_approve_submission(self, clean_db):
+        """Test approving a submission."""
+        from bot import approve_callback
+        
+        create_admin(111111)
+        student = create_registered_student(222222)
+        create_task_with_topic("task1", "t1", "m1")
+        sub_id = db.add_submission(student['id'], "task1", "code", True, "✅")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data=f"approve:{sub_id}", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await approve_callback(update, context)
+        
+        # Check submission was approved
+        submission = db.get_submission_by_id(sub_id)
+        assert submission['approved'] == 1
+    
+    @pytest.mark.asyncio
+    async def test_unapprove_submission(self, clean_db):
+        """Test unapproving a submission."""
+        from bot import unapprove_callback
+        
+        create_admin(111111)
+        student = create_registered_student(222222)
+        create_task_with_topic("task1", "t1", "m1")
+        sub_id = db.add_submission(student['id'], "task1", "code", True, "✅")
+        db.approve_submission(sub_id, 1)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data=f"unapprove:{sub_id}", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await unapprove_callback(update, context)
+        
+        # Check submission was unapproved
+        submission = db.get_submission_by_id(sub_id)
+        assert submission['approved'] == 0
+
+
+# ============= ASSIGN TASK CALLBACK TESTS =============
+
+class TestAssignCallbacks:
+    """Tests for task assignment callbacks."""
+    
+    @pytest.mark.asyncio
+    async def test_assign_callback_menu(self, clean_db):
+        """Test assign menu for student."""
+        from bot import assign_callback
+        
+        create_admin(111111)
+        student = create_registered_student(222222)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data=f"assign:{student['id']}", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await assign_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        # Should show assignment options
+        assert "Назнач" in call_text or "модул" in call_text.lower()
+    
+    @pytest.mark.asyncio
+    async def test_toggleassign_callback(self, clean_db):
+        """Test toggling task assignment."""
+        from bot import toggleassign_callback
+        
+        create_admin(111111)
+        student = create_registered_student(222222)
+        create_task_with_topic("task1", "t1", "m1")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        # toggleassign format is "toggleassign:TASK_ID" and uses context.user_data["assigning_to"]
+        query = MockCallbackQuery(
+            data="toggleassign:task1", 
+            from_user=user, 
+            message=message
+        )
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext(user_data={"assigning_to": student['id']})
+        
+        await toggleassign_callback(update, context)
+        
+        # Task should now be assigned
+        assert db.is_task_assigned(student['id'], "task1")
+
+
+# ============= MENTOR CALLBACK TESTS =============
+
+class TestMentorCallbacks:
+    """Tests for mentor assignment callbacks."""
+    
+    @pytest.mark.asyncio
+    async def test_mentors_view(self, clean_db):
+        """Test viewing student's mentors."""
+        from bot import mentors_callback
+        
+        create_admin(111111)
+        student = create_registered_student(222222)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data=f"mentors:{student['id']}", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await mentors_callback(update, context)
+        
+        call_text = query.edit_message_text.call_args[0][0]
+        assert "Ментор" in call_text or "ментор" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_addmentor_callback(self, clean_db):
+        """Test adding mentor to student."""
+        from bot import addmentor_callback
+        
+        create_admin(111111)
+        create_admin(333333)  # Second admin to be mentor
+        student = create_registered_student(222222)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(
+            data=f"addmentor:{student['id']}:{333333}", 
+            from_user=user, 
+            message=message
+        )
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await addmentor_callback(update, context)
+        
+        # Mentor should be assigned
+        assert db.is_mentor_of(333333, student['id'])
+
+
+# ============= CHEATER CALLBACK TESTS =============
+
+class TestCheaterCallback:
+    """Tests for cheater handling callbacks."""
+    
+    @pytest.mark.asyncio
+    async def test_cheater_callback_mark(self, clean_db):
+        """Test marking submission as cheated."""
+        from bot import cheater_callback
+        
+        create_admin(111111)
+        student = create_registered_student(222222)
+        db.add_bonus_points(student['id'], 10)
+        create_task_with_topic("task1", "t1", "m1")
+        sub_id = db.add_submission(student['id'], "task1", "code", True, "✅")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data=f"cheater:{sub_id}:3", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await cheater_callback(update, context)
+        
+        # Check submission marked and penalty applied
+        submission = db.get_submission_by_id(sub_id)
+        assert submission['passed'] == 0
+        assert "СПИСАНО" in submission['feedback']
+        updated_student = db.get_student(222222)
+        assert updated_student['bonus_points'] == 7  # 10 - 3 penalty
+
+
+# ============= DELETE SUBMISSION CALLBACK TESTS =============
+
+class TestDelsubCallback:
+    """Tests for delete submission callback."""
+    
+    @pytest.mark.asyncio
+    async def test_delsub_callback(self, clean_db):
+        """Test deleting a submission."""
+        from bot import delsub_callback
+        
+        create_admin(111111)
+        student = create_registered_student(222222)
+        create_task_with_topic("task1", "t1", "m1")
+        sub_id = db.add_submission(student['id'], "task1", "code", True, "✅")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        query = MockCallbackQuery(data=f"delsub:{sub_id}", from_user=user, message=message)
+        update = MockUpdate(callback_query=query, effective_user=user)
+        context = MockContext()
+        
+        await delsub_callback(update, context)
+        
+        # Submission should be deleted
+        assert db.get_submission_by_id(sub_id) is None
+
+
+# ============= COMMAND TESTS =============
+
+class TestCommands:
+    """Tests for command handlers."""
+    
+    @pytest.mark.asyncio
+    async def test_topics_cmd(self, clean_db):
+        """Test /topics command (requires registration)."""
+        from bot import topics_cmd
+        
+        db.add_module("mod1", "Test Module", 1, "python")
+        db.add_topic("topic1", "Test Topic", "mod1", 1)
+        # Register user first (topics_cmd has @require_registered decorator)
+        create_registered_student(111111)
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        update = MockUpdate(message=message, effective_user=user)
+        context = MockContext()
+        
+        await topics_cmd(update, context)
+        
+        message.reply_text.assert_called_once()
+        call_text = message.reply_text.call_args[0][0]
+        assert "Модул" in call_text or "📚" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_leaderboard_cmd(self, clean_db):
+        """Test /leaderboard command."""
+        from bot import leaderboard_cmd
+        
+        create_registered_student(111111, "top", "TopPlayer")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        update = MockUpdate(message=message, effective_user=user)
+        context = MockContext()
+        
+        await leaderboard_cmd(update, context)
+        
+        message.reply_text.assert_called_once()
+        call_text = message.reply_text.call_args[0][0]
+        assert "Лидерборд" in call_text or "🏆" in call_text
+    
+    @pytest.mark.asyncio
+    async def test_deltask_cmd_admin(self, clean_db):
+        """Test /deltask command for admin."""
+        from bot import del_task_cmd
+        
+        create_admin(111111)
+        create_task_with_topic("task_to_delete", "t1", "m1")
+        
+        user = MockUser(id=111111)
+        message = MockMessage(from_user=user)
+        update = MockUpdate(message=message, effective_user=user)
+        context = MockContext(args=["task_to_delete"])
+        
+        await del_task_cmd(update, context)
+        
+        # Task should be deleted
+        assert db.get_task("task_to_delete") is None
