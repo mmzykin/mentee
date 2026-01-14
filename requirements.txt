@@ -59,3 +59,10 @@ urllib3==2.6.3
 wcwidth==0.2.14
 webencodings==0.5.1
 yarg==0.1.9
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+pytest-cov>=6.0.0
+pytest-mock>=3.14.0
+coverage>=7.6.0

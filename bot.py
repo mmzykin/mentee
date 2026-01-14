@@ -41,7 +41,7 @@ import database as db
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 EXEC_TIMEOUT = 10
-ADMIN_USERNAMES = ["qwerty1492", "redd_dd"]
+ADMIN_USERNAMES = ["qwerty1492", "redd_dd", "gixal9"]
 BONUS_POINTS_PER_APPROVAL = 1
 def get_raw_text(message) -> str:
     """
@@ -166,6 +166,17 @@ async def safe_answer(query, text=None, show_alert=False):
         return True
     except Exception:
         return False
+
+
+async def safe_edit(query, text, reply_markup=None, parse_mode="HTML"):
+    """Safely edit message, ignoring 'message not modified' errors"""
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        return True
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            return True  # Not an error, just nothing changed
+        raise
 
 
 def parse_task_format(text: str) -> Optional[dict]:
@@ -436,7 +447,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             has_assigned = len(db.get_assigned_tasks(student["id"])) > 0
             can_spin = db.can_spin_daily(student["id"])
             unread_ann = db.get_unread_announcements_count(student["id"])
-        await query.edit_message_text("🏠 <b>Главное меню</b>", reply_markup=main_menu_keyboard(is_admin, has_assigned, can_spin, unread_ann), parse_mode="HTML")
+        await safe_edit(query, "🏠 <b>Главное меню</b>", reply_markup=main_menu_keyboard(is_admin, has_assigned, can_spin, unread_ann))
     elif action == "mystats":
         student = db.get_student(user.id)
         if not student:
@@ -1077,6 +1088,8 @@ async def create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
     
     elif action == "announcement":
+        # Clear any pending feedback to avoid conflicts
+        context.user_data.pop("feedback_for", None)
         context.user_data["creating"] = "announcement"
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin:announcements")]])
         await query.edit_message_text(
@@ -1542,6 +1555,8 @@ async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⛔")
         return
     sub_id = int(query.data.split(":")[1])
+    # Clear any pending "creating" state to avoid conflicts
+    context.user_data.pop("creating", None)
     context.user_data["feedback_for"] = sub_id
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"code:{sub_id}")]])
     await query.edit_message_text(f"💬 Отправь фидбек для попытки #{sub_id}:", reply_markup=keyboard)
